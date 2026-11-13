@@ -5936,6 +5936,20 @@ async function crmNotizia(
   };
 }
 
+function crmTermineContatto(testo: string): string {
+  let s = testo.trim().replace(/[.!?]+$/g, "").replace(/\s+/g, " ");
+  const prefisso = /^(?:per favore|perfavore|mi|puoi|mostrami|mostra|fammi vedere|elenca|elenco|lista|cerca|trova|dimmi|vedi|apri|visualizza|tutti|tutte|i|gli|le|il|la|dei|delle|miei|mie|mio|mia|di|del|della|dello)\s+/i;
+  for (let i = 0; i < 8; i++) {
+    const n = s.replace(prefisso, "").trim();
+    if (n === s) break;
+    s = n;
+  }
+  s = s.replace(/^(?:contatti|contatto|rubrica|anagrafica)\b\s*/i, "").trim();
+  s = s.replace(/^(?:di|del|della|dello|miei|mie)\s+/i, "").trim();
+  if (/^(?:contatti|contatto|rubrica|anagrafica|visibili|disponibili|miei|mie)?$/i.test(s)) return "";
+  return s.slice(0, 250);
+}
+
 async function crmCerca(
   id: number,
   testo: string,
@@ -5947,7 +5961,7 @@ async function crmCerca(
     return "Notizia non disponibile.";
   }
 
-  const ricerca = testo.trim().slice(0, 250);
+  const ricerca = crmTermineContatto(testo);
   const pattern = "%" + ricerca.replace(/[\\%_]/g, "\\$&") + "%";
   const telefono = ricerca.replace(/\D/g, "");
 
@@ -5985,13 +5999,13 @@ async function crmCerca(
     text: (
       notizia
         ? `Scegli un contatto da collegare alla notizia #${notizia}.`
-        : soloArchivio ? "Contatti archiviati:" : "Contatti visibili:"
+        : soloArchivio ? "Contatti archiviati:" : (ricerca ? "Contatti trovati:" : "I tuoi contatti:")
     ) + "\n\n" + (
       pagina.map(c =>
         `#${c.id} · ${crmNome(c).slice(0, 80)} · ${
           c.telefono || "senza telefono"
         }${c.archiviato ? " · archiviato" : ""}`
-      ).join("\n") || "Nessun risultato."
+      ).join("\n") || (ricerca ? "Nessun contatto corrisponde a " + ricerca + "." : "Nessun contatto in rubrica.")
     ),
 
     inline_keyboard: [
