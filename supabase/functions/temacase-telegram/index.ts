@@ -1746,9 +1746,21 @@ async function leggiSchedaNotiziaBase32(telegramId: number, id: string): Promise
       );
     }
 
-    const attivita = followup.slice(0, 5).map((f) =>
-      `• ${f.descrizione} · ${[f.data, f.ora, f.stato].filter(Boolean).join(" · ")}`
-    );
+    const collegati63=await db<{id:string;descrizione:string;data:string|null;stato:string}[]>`
+      SELECT a.id::text AS id,a.descrizione,to_char(a.scadenza_data,'DD/MM/YYYY') AS data,a.stato
+      FROM temacase_test.crm_personali_notizie l
+      JOIN temacase_test.crm_attivita_personali a ON a.id=l.personale_id
+      WHERE l.notizia_id=${id}::bigint AND l.consulente_telegram_id=${telegramId}
+        AND a.consulente_telegram_id=${telegramId}
+      ORDER BY a.scadenza_data DESC NULLS LAST,a.id LIMIT 15`;
+    const attivita = [
+      ...followup.slice(0, 5).map((f) =>
+        `• ${f.descrizione} · ${[f.data, f.ora, f.stato].filter(Boolean).join(" · ")}`
+      ),
+      ...collegati63.map((a) =>
+        `• ${a.descrizione} · ${[a.data, a.stato].filter(Boolean).join(" · ")}`
+      ),
+    ];
     if (followup.length > 5) attivita.push("Altri follow-up presenti.");
     sezioni.push(`Follow-up della notizia\n${attivita.join("\n") || "Nessuno registrato."}`);
     // Storico datato distinto dai task/follow-up e dalla segnalazione originale.
@@ -1758,17 +1770,14 @@ async function leggiSchedaNotiziaBase32(telegramId: number, id: string): Promise
       WHERE g.notizia_id=${id}::bigint AND g.consulente_telegram_id=${telegramId}
       ORDER BY g.data_sviluppo DESC,g.id DESC LIMIT 5`;
     sezioni.push('Gestione / sviluppo notizia\n'+(sviluppi.length ? sviluppi.map(x=>x.data+' · '+x.nota).join('\n') : 'Nessun aggiornamento registrato.'));
-    // TEMACASE_TASK_NOTIZIE_V63: attività personali esplicitamente associate, senza duplicare Google Task.
-    const collegati63=await db<{id:string;descrizione:string;data:string|null;stato:string}[]>`
-      SELECT a.id::text AS id,a.descrizione,a.scadenza_data::text AS data,a.stato
-      FROM temacase_test.crm_personali_notizie l
-      JOIN temacase_test.crm_attivita_personali a ON a.id=l.personale_id
-      WHERE l.notizia_id=${id}::bigint AND l.consulente_telegram_id=${telegramId}
-        AND a.consulente_telegram_id=${telegramId}
-      ORDER BY a.scadenza_data DESC NULLS LAST,a.id LIMIT 15`;
-    if(collegati63.length)sezioni.push('Task personali collegati alla notizia\n'+collegati63.map(a=>
-      `${a.descrizione} · ${a.data||'Senza data'} · ${a.stato}`).join('\n'));
-
+    const [invioGoogle]=await db<{id:string}[]>`
+      SELECT o.id::text AS id
+      FROM temacase_test.crm_google_invii o
+      JOIN temacase_test.crm_personali_notizie l ON l.personale_id=o.fonte_id
+      WHERE o.fonte='personale' AND o.stato='sincronizzato'
+        AND l.notizia_id=${id}::bigint AND l.consulente_telegram_id=${telegramId}
+        AND o.consulente_telegram_id=${telegramId}
+      ORDER BY o.creato_il DESC LIMIT 1`;
 
     const testo = sezioni.filter(Boolean).join("\n\n");
     return {
@@ -1777,6 +1786,7 @@ async function leggiSchedaNotiziaBase32(telegramId: number, id: string): Promise
         [{ text: "Modifica", callback_data: `m:menu:${id}` }],
         [{ text: "Gestione / sviluppo", callback_data: `z55:open:${id}` }],
         [{ text: "Nuovo task/evento per questa notizia", callback_data: `t:fn:new:${id}` }],
+        ...(invioGoogle ? [[{ text: "Aggiorna descrizione Google", callback_data: `t:gm:rp37:${invioGoogle.id}` }]] : []),
         [{ text: "Collega task già creato", callback_data: `n63:list:${id}` }],
         [{ text: "Contatti / Proprietari", callback_data: `t:note:${id}` }],
         [{ text: "Gestisci custode", callback_data: `k:n:${id}` }],
@@ -5265,7 +5275,7 @@ async function n63Pulsante(cb:any,token:string):Promise<void>{
  const id=cb.from?.id,chat=cb.message?.chat;
  if(!Number.isSafeInteger(id)||chat?.type!=='private'||chat.id!==id)return;
  await telegramPost(token,'answerCallbackQuery',{callback_query_id:cb.id});
- const m=/^n63:(list|pick|ok):([1-9]\d{0,18})(?::([0-9a-f-]{36}))?$/.exec(String(cb.data||''));
+ const m=/^n63:(list|pick|ok):([1-9]\d{0,18})(?::([1-9]\d{0,18}))?$/.exec(String(cb.data||''));
  if(!m||!idSchedaValido(m[2]))return;
  const [,azione,n,personal]=m;
  try{
@@ -5283,12 +5293,12 @@ async function n63Pulsante(cb:any,token:string):Promise<void>{
    await inviaRisposta(token,id,{text:'Notizia #'+n+' · Seleziona un Task personale da collegare.\nL\'attività Google esistente NON sarà duplicata.\n\n'+(libere.map((a:any,i:number)=>`${i+1}. ${a.descrizione} · ${a.data||'Senza data'}`).join('\n')||'Nessuna attività personale da collegare nelle ultime 15.'),
     inline_keyboard:[...libere.map((a:any)=>[{text:'Collega: '+String(a.descrizione).slice(0,44),callback_data:`n63:pick:${n}:${a.id}`}]),[{text:'Apri notizia',callback_data:`d:${id}:${n}`}]]});return;
   }
-  if(!personal||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(personal))return;
+  if(!personal||!idSchedaValido(personal))return;
   const rows=await crmDb<any[]>(id,async db=>db`
    SELECT a.id::text,a.descrizione,a.scadenza_data::text AS data,l.notizia_id::text AS collegata
    FROM temacase_test.crm_attivita_personali a
    LEFT JOIN temacase_test.crm_personali_notizie l ON l.personale_id=a.id
-   WHERE a.id=${personal}::uuid AND a.consulente_telegram_id=${id}`);
+   WHERE a.id=${personal}::bigint AND a.consulente_telegram_id=${id}`);
   if(!rows.length){await inviaRisposta(token,id,'Attività non disponibile.');return;}
   const a=rows[0];
   if(a.collegata){await inviaRisposta(token,id,'Questa attività è già collegata alla notizia #'+a.collegata+'.');return;}
@@ -5299,12 +5309,12 @@ async function n63Pulsante(cb:any,token:string):Promise<void>{
    INSERT INTO temacase_test.crm_personali_notizie(personale_id,notizia_id,consulente_telegram_id)
    SELECT a.id,n.id,${id} FROM temacase_test.crm_attivita_personali a
    JOIN temacase_test.notizie_acquisizione n ON n.id=${n}::bigint AND n.consulente_telegram_id=${id}
-   WHERE a.id=${personal}::uuid AND a.consulente_telegram_id=${id}
+   WHERE a.id=${personal}::bigint AND a.consulente_telegram_id=${id}
    ON CONFLICT (personale_id) DO NOTHING RETURNING personale_id`);
   if(!inserted.length){await inviaRisposta(token,id,'Collegamento non confermato oppure già presente. Riapri la scheda.');return;}
   const g=await crmDb<any[]>(id,async db=>db`
    SELECT o.id::text AS id FROM temacase_test.crm_google_invii o
-   WHERE o.fonte='personale' AND o.fonte_id=${personal}::uuid
+   WHERE o.fonte='personale' AND o.fonte_id=${personal}::bigint
      AND o.consulente_telegram_id=${id} AND o.stato='sincronizzato'
    ORDER BY o.id DESC LIMIT 1`);
   await inviaRisposta(token,id,{text:`Task collegato alla notizia #${n} senza duplicati.\nPer inserire indirizzo, prezzo, contatti e altri dettagli nell'elemento Google esistente, premi Aggiorna descrizione Google e conferma l'anteprima.`,inline_keyboard:[...(g[0]?[ [{text:'Aggiorna descrizione Google',callback_data:`t:gm:rp37:${g[0].id}`}] ]:[]),[{text:'Apri notizia aggiornata',callback_data:`d:${id}:${n}`}]]});
@@ -8844,10 +8854,13 @@ async function ai31Instrada(id:number,t:string,p:any,se:CrmSessione|undefined,mo
  }
  if(p.azione==='crea_attivita'){
   if(!['visita','proposta','followup','ruolo'].includes(p.tipo))return 'Vuoi creare un task, un evento o una visita?';
-  if(p.ambito==='notizia'||(p.tipo==='followup'&&/\b(?:notizia|scheda)\s*(?:numero\s*)?#?\s*\d+/i.test(t))){
+  const ultimaScheda=(mem?.storia||[]).filter((m:any)=>m.role==='assistant').at(-1)?.content||'';
+  const personaleEsplicito=/\b(?:attivit[aà]\s+personale|solo\s+personale|senza\s+colleg)/i.test(t);
+  const notaAperta=/notizia\s*#(\d+)/i.exec(ultimaScheda)?.[1];
+  if(!personaleEsplicito&&(p.ambito==='notizia'||(p.tipo==='followup'&&/\b(?:notizia|scheda)\s*(?:numero\s*)?#?\s*\d+/i.test(t))||(p.tipo==='followup'&&notaAperta))){
    const esplicita=/\b(?:notizia|scheda)\s*(?:numero\s*)?#?\s*([a-z0-9]+)/i.exec(t);
-   const ultima=(mem?.storia||[]).filter((m:any)=>m.role==='assistant').at(-1)?.content||'';
-   const nota=esplicita?leggiIdScheda('notizia '+esplicita[1]):st?.fase==='fn28'?st.notizia:/notizia\s*#(\d+)/i.exec(ultima)?.[1];
+   const ultima=ultimaScheda;
+   const nota=esplicita?leggiIdScheda('notizia '+esplicita[1]):st?.fase==='fn28'?st.notizia:(/notizia\s*#(\d+)/i.exec(ultima)?.[1]||notaAperta);
    if(!nota)return 'Apri la notizia a cui vuoi collegare il follow-up, poi dettami l’attivita.';
    const r=await fn28Apri(id,String(nota));const nuova=await crmSessione(id);
    return nuova?.stato.fase==='fn28'?ai31Completa(id,nuova,campi):r;
