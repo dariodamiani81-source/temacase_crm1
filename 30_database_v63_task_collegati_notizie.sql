@@ -13,7 +13,7 @@ DO $$ BEGIN
  END IF;
 END $$;
 CREATE TABLE IF NOT EXISTS temacase_test.crm_personali_notizie(
- personale_id uuid PRIMARY KEY REFERENCES temacase_test.crm_attivita_personali(id) ON DELETE CASCADE,
+ personale_id bigint PRIMARY KEY REFERENCES temacase_test.crm_attivita_personali(id) ON DELETE CASCADE,
  notizia_id bigint NOT NULL REFERENCES temacase_test.notizie_acquisizione(id) ON DELETE CASCADE,
  consulente_telegram_id bigint NOT NULL,
  associato_il timestamptz NOT NULL DEFAULT now()
