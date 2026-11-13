@@ -1,5 +1,6 @@
-﻿.env
+.env
 .env.*
+!.env.example
 **/__pycache__/
 **/node_modules/
 **/.venv/
@@ -7,7 +8,17 @@
 *.pyc
 .DS_Store
 Thumbs.db
+
+# Credenziali locali: non vanno nel repo
 chiavi*.txt
 *client_secret*
 *.apps.googleusercontent.com.json
+*service-account*.json
+credentials.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Artefatti della CLI Supabase (ref progetto, organizzazione, URL pooler)
 supabase/.temp/
