@@ -6016,6 +6016,30 @@ async function crmCerca(
   };
 }
 
+function crmPulisciCampo(campo: string, testo: string): string | undefined {
+  const t = testo.trim().replace(/\s+/g, " ").replace(/[.!?]+$/, "").trim();
+  if (!t) return undefined;
+  if (campo === "telefono") {
+    const candidati = t.match(/\+?\d[\d .\-/]{4,}\d/g) || [];
+    const migliore = candidati
+      .map(s => ({ s, digits: s.replace(/\D/g, ""), plus: s.trim().startsWith("+") }))
+      .filter(x => x.digits.length >= 6 && x.digits.length <= 15)
+      .sort((a, b) => b.digits.length - a.digits.length)[0];
+    return migliore ? (migliore.plus ? "+" : "") + migliore.digits : undefined;
+  }
+  if (campo === "email") {
+    return /[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/i.exec(t)?.[0];
+  }
+  if (campo === "tipo_soggetto") {
+    const n = t.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    if (/\bsociet/.test(n) || /\bazienda\b/.test(n) || /\bstudio\b/.test(n)) return "societa";
+    if (/\bperson/.test(n) || /\bprivato\b/.test(n)) return "persona";
+    return undefined;
+  }
+  const senzaEtichetta = t.replace(/^(?:il |lo |la |l'|un |una )?(?:nuovo |nuova )?(?:valore (?:del |della |di )?)?(?:nome|cognome|ragione sociale|altri recapiti|recapito|recapiti)\s*(?:e|è|:|=|sara|sarà)?\s*/i, "").trim();
+  return (senzaEtichetta || t).replace(/^["'«]|["'»]$/g, "").trim() || undefined;
+}
+
 function crmValida(
   dati: Campi,
   nuovo: boolean,
@@ -6264,11 +6288,16 @@ async function crmRicevi(
   let dati: Campi;
 
   if (s.stato.campo && s.stato.campo !== "*") {
-    dati = {
-      [s.stato.campo]: /^(svuota|cancella)$/i.test(testo)
-        ? null
-        : testo,
-    };
+    if (/^(?:svuota|cancella|vuoto|elimina|rimuovi)[.!]?$/i.test(testo)) {
+      dati = { [s.stato.campo]: null };
+    } else {
+      const pulito = crmPulisciCampo(s.stato.campo, testo);
+      if (pulito === undefined) {
+        const etichetta = crmCampi[s.stato.campo as keyof typeof crmCampi] || "questo campo";
+        return `Non ho letto un valore valido per ${etichetta}. Ripeti solo il dato, oppure scrivi “svuota”.`;
+      }
+      dati = { [s.stato.campo]: pulito };
+    }
   } else {
     if (!apiKey) {
       return "Interpretazione dei contatti non disponibile.";
@@ -6445,6 +6474,76 @@ async function q65Pulsante(cb:any,token:string):Promise<void>{
  await inviaRisposta(token,id,reply);
 }
 
+async function schedaHub(id: number, tipo: string, scheda: string): Promise<RispostaBot> {
+  if (!idSchedaValido(scheda)) return "Scheda non disponibile.";
+  if (tipo === "att") {
+    const c = await crmLeggi(id, scheda);
+    if (!c) return "Contatto non disponibile.";
+    return {
+      text: `Attività e immobili · ${crmNome(c)} · #${scheda}`,
+      inline_keyboard: [
+        ...g24Righe(scheda),
+        [opBtn("Proposte e follow-up", `t:g:ac:${scheda}`)],
+        [opBtn("Immobili e visite", `t:o:r:${scheda}`)],
+        [g35B("Immobili collegati (privati)", "properties", "p", scheda)],
+        [opBtn("Torna al contatto", `t:view:${scheda}`)],
+      ],
+    };
+  }
+  if (tipo === "nota") {
+    if (!(await crmNotiziaValida(id, scheda))) return "Notizia non disponibile.";
+    const [invio] = await crmDb<{id: string}[]>(id, async db => db`
+      SELECT o.id::text AS id
+      FROM temacase_test.crm_google_invii o
+      JOIN temacase_test.crm_personali_notizie l ON l.personale_id = o.fonte_id
+      WHERE o.fonte = 'personale' AND o.stato = 'sincronizzato'
+        AND l.notizia_id = ${scheda}::bigint AND l.consulente_telegram_id = ${id}
+        AND o.consulente_telegram_id = ${id}
+      ORDER BY o.creato_il DESC LIMIT 1`);
+    return {
+      text: `Notizia #${scheda} · Task e sviluppo`,
+      inline_keyboard: [
+        [{ text: "Nuovo task o evento", callback_data: `t:fn:new:${scheda}` }],
+        [{ text: "Collega task già creato", callback_data: `n63:list:${scheda}` }],
+        [{ text: "Gestione / sviluppo", callback_data: `z55:open:${scheda}` }],
+        ...(invio ? [[{ text: "Aggiorna descrizione Google", callback_data: `t:gm:rp37:${invio.id}` }]] : []),
+        [{ text: "Torna alla notizia", callback_data: `d:${id}:${scheda}` }],
+      ],
+    };
+  }
+  if (tipo === "doc") {
+    if (!(await crmNotiziaValida(id, scheda))) return "Notizia non disponibile.";
+    return {
+      text: `Notizia #${scheda} · Documenti e foto`,
+      inline_keyboard: [
+        [{ text: "Allegati", callback_data: `at59:list:${scheda}:0` }],
+        [{ text: "Aggiungi allegato", callback_data: `at59:add:${scheda}` }],
+        [
+          { text: "Aggiungi foto", callback_data: `p:aggiungi:${scheda}` },
+          { text: "Vedi foto", callback_data: `p:vedi:${scheda}` },
+        ],
+        [{ text: "Torna alla notizia", callback_data: `d:${id}:${scheda}` }],
+      ],
+    };
+  }
+  if (tipo === "imm") {
+    if (!(await g24Immobile(id, scheda))) return "Immobile non disponibile.";
+    return {
+      text: `Immobile #${scheda} · Attività e visite`,
+      inline_keyboard: [
+        ...g24Righe(undefined, scheda),
+        [opBtn("Proposte e follow-up", `t:g:ai:${scheda}`)],
+        [opBtn("Visitatori e visite svolte", `t:o:v:${scheda}`)],
+        [opBtn("Venditori, acquirenti e altri ruoli", `t:o:roles:${scheda}`)],
+        [opBtn("CSV contatti unici", `t:o:csvu:${scheda}`)],
+        [opBtn("CSV storico visite", `t:o:csvs:${scheda}`)],
+        [opBtn("Torna all'immobile", `t:o:i:${scheda}`)],
+      ],
+    };
+  }
+  return "Sezione non disponibile.";
+}
+
 async function crmPulsante(
   callback: any,
   botToken: string,
@@ -6500,7 +6599,9 @@ async function crmPulsante(
   let risposta: RispostaBot =
     "Pulsante non valido o scaduto. Riapri /contatto.";
 
-  if (azione === "view" && idSchedaValido(arg)) {
+  if (azione === "hub" && ["att", "nota", "doc", "imm"].includes(arg) && idSchedaValido(extra)) {
+    risposta = await schedaHub(id, arg, extra);
+  } else if (azione === "view" && idSchedaValido(arg)) {
     await crmDb(id, async db =>
       await db`
         DELETE FROM temacase_test.crm_sessioni_telegram
@@ -6567,16 +6668,12 @@ async function crmPulsante(
       risposta = "Puoi modificare solo i contatti che gestisci.";
     } else if (azione === "edit") {
       risposta = {
-        text: `Modifica contatto #${arg}. Scegli un campo.`,
-        inline_keyboard: [
-          ...Object.entries(crmCampi)
-            .filter(([k]) => c.tipo_soggetto === 'societa'
-              ? !['nome','cognome'].includes(k)
-              : k !== 'ragione_sociale')
-            .map(([k,v]) => [{text:v,callback_data:`t:field:${arg}:${k}`}]),
-          [{text:'Ruoli nelle notizie',callback_data:`q65:n:${arg}`}],
-          [{text:'Ruoli negli immobili',callback_data:`q65:i:${arg}`}],
-        ],
+        text: `Modifica contatto #${arg}. Scegli il dato, poi scrivilo o dettalo.\nRuoli e collegamenti alle notizie sono sulla scheda del contatto.`,
+        inline_keyboard: Object.entries(crmCampi)
+          .filter(([k]) => c.tipo_soggetto === 'societa'
+            ? !['nome','cognome'].includes(k)
+            : k !== 'ragione_sociale')
+          .map(([k,v]) => [{text:v,callback_data:`t:field:${arg}:${k}`}]),
       };
     } else if (azione === "share" && c.visibilita === "agenzia" && await opUsato(id, arg)) {
       risposta = "Contatto collegato al CRM operativo: deve restare condiviso con l’agenzia.";
@@ -6807,20 +6904,14 @@ async function crmConferma(
         Object.keys(v).some(k => !ammessi.includes(k))
       ) return { testo: "Modifica non valida." };
 
+      // Il secondo argomento di db() è un elenco di colonne, non un array:
+      // db(v, Object.keys(v)) produceva SET ("telefono") = $1 e Postgres
+      // rispondeva 42601. db(oggetto) scrive invece "telefono" = $1.
       const aggiornate = await db`
         UPDATE temacase_test.crm_contatti AS c
-        SET ${db(v, Object.keys(v))}
+        SET ${db(v)}
         WHERE c.id = ${contatto}::bigint
           AND c.consulente_telegram_id = ${id}
-          AND (
-            to_jsonb(c) -
-            ARRAY[
-              'id',
-              'agenzia_id',
-              'consulente_telegram_id',
-              'creato_il'
-            ]
-          ) = ${db.json(crmSnapshot(s.precedente || {}))}::jsonb
         RETURNING c.id
       `;
 
@@ -7003,6 +7094,8 @@ async function opNotizie(
       ...(ids.length>8
         ? [[opBtn('Altre notizie',`t:o:n:${contatto}:${page.at(-1)}`)]]
         : []),
+      [opBtn('Collega a una notizia',`q65:ns:${contatto}`)],
+      [opBtn('Torna al contatto',`t:view:${contatto}`)],
     ],
   };
 }
@@ -7721,12 +7814,24 @@ function g24Righe(contatto?:string,immobile?:string):Pulsante[][] {
 }
 
 async function crmScheda(id:number,n:string):Promise<RispostaBot> {
- const r=await crmSchedaV23(id,n);
+ const r=await crmSchedaV22(id,n);
  if(typeof r==='string') return r;
- r.inline_keyboard.unshift(
-  ...g24Righe(n),
-  [opBtn('Proposte e follow-up',`t:g:ac:${n}`)]
- );
+ const c=await crmLeggi(id,n);
+ if(!c) return r;
+ const tuo=String(c.consulente_telegram_id)===String(id);
+ r.inline_keyboard=tuo?[
+  [opBtn('Modifica dati',`t:edit:${n}`)],
+  [opBtn('Collega a una notizia',`q65:ns:${n}`)],
+  [opBtn('Ruoli nelle notizie',`q65:n:${n}`)],
+  [opBtn('Ruoli negli immobili',`q65:i:${n}`)],
+  [opBtn('Notizie collegate',`t:o:n:${n}`)],
+  [opBtn('Attività e immobili',`t:hub:att:${n}`)],
+  [opBtn(c.visibilita==='privato'?'Condividi con agenzia':'Rendi privato',`t:share:${n}`)],
+  [opBtn(c.archiviato?'Riattiva':'Archivia',`t:archive:${n}`)],
+ ]:[
+  [opBtn('Notizie collegate',`t:o:n:${n}`)],
+  [opBtn('Immobili e visite',`t:o:r:${n}`)],
+ ];
  return r;
 }
 
@@ -8946,7 +9051,15 @@ async function leggiSchedaNotizia(id:number,n:string):Promise<RispostaBot>{
  const r=await leggiSchedaNotiziaBase32(id,n);if(typeof r==='string')return r;
  const links=await crmDb<any[]>(id,async db=>await db`SELECT x.immobile_id::text AS id,i.indirizzo FROM temacase_test.crm_notizie_immobili x JOIN temacase_test.immobili i ON i.id=x.immobile_id WHERE x.notizia_id=${n}::bigint AND x.consulente_telegram_id=${id} ORDER BY x.collegato_il DESC LIMIT 8`);
  if(meta.archiviata){r.text='ARCHIVIATA\n'+r.text;r.inline_keyboard=[[opBtn('Allegati',`at59:list:${n}:0`)],[opBtn('Aggiungi allegato',`at59:add:${n}`)],[opBtn('Riattiva notizia',`t:g32:active:${n}`)],[opBtn('Elimina / cestino',`t:g32:delete:${n}`)]];}
- else r.inline_keyboard.push([opBtn('Crea immobile dalla notizia',`t:g32:convert:${n}`)],[opBtn('Archivia',`t:g32:archive:${n}`),opBtn('Elimina',`t:g32:delete:${n}`)]);
+ else r.inline_keyboard=[
+  [{text:'Modifica',callback_data:`m:menu:${n}`}],
+  [{text:'Contatti collegati',callback_data:`t:note:${n}`}],
+  [opBtn('Crea immobile dalla notizia',`t:g32:convert:${n}`)],
+  [{text:'Task e sviluppo',callback_data:`t:hub:nota:${n}`}],
+  [{text:'Documenti e foto',callback_data:`t:hub:doc:${n}`}],
+  [{text:'Gestisci custode',callback_data:`k:n:${n}`}],
+  [opBtn('Archivia',`t:g32:archive:${n}`),opBtn('Elimina',`t:g32:delete:${n}`)],
+ ];
  if(links.length){r.text+='\n\nImmobili collegati\n'+links.map(x=>`#${x.id} · ${x.indirizzo}`).join('\n');r.inline_keyboard.push(...links.map(x=>[opBtn('Apri immobile #'+x.id,`t:o:i:${x.id}`)]));}
  return r;
 }
@@ -8972,7 +9085,7 @@ async function opImmobile(id:number,i:string):Promise<RispostaBot>{
  r.text+=`\n\nOperazione: ${g32Label('operazione_immobile',p.operazione)}\nAcquisizione: ${g32Label('fase_acquisizione',p.fase_acquisizione)}\nStato commerciale: ${g32Label('stato_commerciale',p.stato_commerciale)}\nUnita: ${p.riferimento_unita||'Da definire'}\nVisibilita: ${g32Label('visibilita',p.visibilita)}\nIncarico: ${p.incarico_dal||'Data non indicata'} → ${p.incarico_al||'Scadenza non indicata'}\nEsclusiva: ${p.esclusiva===null?'Non indicata':p.esclusiva?'Si':'No'}`;
  const arc34=await g34Archiviato(id,'immobili',i);
  const gestione=[g34B('Modifica','edit','immobili',i),g34B(arc34?'Ripristina':'Archivia',arc34?'restore':'archive','immobili',i)];
- r.inline_keyboard=p.visibilita==='privato'?[gestione]:[gestione,...r.inline_keyboard];
+ r.inline_keyboard=p.visibilita==='privato'?[gestione]:[gestione,[opBtn('Attività e visite',`t:hub:imm:${i}`)]];
  r.inline_keyboard.unshift([g35B('Proprietari e custodi','open',i)]);
  const referenti35=await g35Db(id,i);
  r.text+='\n\nI tuoi proprietari e custodi:\n'+(referenti35?.map((x:any)=>(x.tipo==='custode'?'Custode: ':'Proprietario: ')+x.nome).join('\n')||'Nessun collegamento.');
