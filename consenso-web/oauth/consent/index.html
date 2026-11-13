@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Temacase CRM – Autorizzazione</title>
+  <style>
+    body { margin: 0; padding: 2rem 1rem; background: #f3f5f4;
+           color: #172620; font: 16px system-ui, sans-serif; }
+    main { max-width: 28rem; margin: auto; padding: 1.5rem;
+           background: white; border: 1px solid #dce4df; border-radius: 12px; }
+    h1 { margin-top: 0; font-size: 1.5rem; }
+    label { display: block; margin-top: 1rem; }
+    input { display: block; box-sizing: border-box; width: 100%;
+            padding: .65rem; margin-top: .3rem; font: inherit; }
+    button { margin-top: 1rem; padding: .65rem 1rem; font: inherit;
+             cursor: pointer; }
+    #stato { overflow-wrap: anywhere; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Temacase CRM – Test</h1>
+    <p id="stato" role="status">Verifica della richiesta…</p>
+
+    <form id="accesso" hidden>
+      <label>Email
+        <input id="email" type="email" autocomplete="username" required>
+      </label>
+      <label>Password
+        <input id="password" type="password"
+               autocomplete="current-password" required>
+      </label>
+      <button id="entra" type="submit">Accedi</button>
+    </form>
+
+    <section id="consenso" hidden>
+      <p><strong>Applicazione:</strong> <span id="app"></span></p>
+      <p><strong>Permessi richiesti:</strong> <span id="permessi"></span></p>
+      <p><strong>Ritorno a:</strong> <span id="destinazione"></span></p>
+      <button id="autorizza" type="button">Autorizza</button>
+      <button id="nega" type="button">Nega</button>
+    </section>
+  </main>
+
+  <script type="module">
+    const URL_SUPABASE = "https://uuilnjjramxjvfoutmqu.supabase.co";
+    const CHIAVE_PUBBLICA = "sb_publishable_dGkXJwDHxvIsFzjz_UTD-A_VMOeWKu6";
+
+    const trova = (id) => document.getElementById(id);
+    const stato = trova("stato");
+    const accesso = trova("accesso");
+    const consenso = trova("consenso");
+    const authorizationId = new URLSearchParams(location.search)
+      .get("authorization_id");
+
+    function tornaAlClient(indirizzo) {
+      const url = new URL(indirizzo);
+      if (url.protocol !== "https:") {
+        throw new Error("L’indirizzo di ritorno deve usare HTTPS.");
+      }
+      window.location.replace(url.href);
+    }
+
+    async function avvia() {
+      if (!authorizationId) {
+        stato.textContent =
+          "Apri questa pagina dal collegamento del connettore in ChatGPT.";
+        return;
+      }
+
+      if (!CHIAVE_PUBBLICA.startsWith("sb_publishable_")) {
+        stato.textContent = "Chiave pubblica Supabase da configurare.";
+        return;
+      }
+
+      const { createClient } = await import(
+        "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.89.0/+esm"
+      );
+
+      const supabase = createClient(URL_SUPABASE, CHIAVE_PUBBLICA, {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+          detectSessionInUrl: false,
+        },
+      });
+
+      stato.textContent = "Accedi con il tuo utente di test Supabase.";
+      accesso.hidden = false;
+
+      accesso.addEventListener("submit", async (evento) => {
+        evento.preventDefault();
+        trova("entra").disabled = true;
+        stato.textContent = "Accesso in corso…";
+
+        try {
+          const { error: erroreAccesso } = await supabase.auth.signInWithPassword({
+            email: trova("email").value.trim(),
+            password: trova("password").value,
+          });
+
+          if (erroreAccesso) throw new Error(erroreAccesso.message);
+
+          const { data, error } = await supabase.auth.oauth
+            .getAuthorizationDetails(authorizationId);
+
+          if (error || !data) {
+            throw new Error(error?.message || "Richiesta OAuth non trovata.");
+          }
+
+          if (!("authorization_id" in data)) {
+            tornaAlClient(data.redirect_url);
+            return;
+          }
+
+          trova("app").textContent =
+            data.client?.name || data.client?.id || "Client OAuth";
+          trova("permessi").textContent = data.scope || "Non indicati";
+          trova("destinazione").textContent = data.redirect_uri || "Non indicata";
+          accesso.hidden = true;
+          consenso.hidden = false;
+          stato.textContent = "Verifica la richiesta prima di autorizzare.";
+        } catch (errore) {
+          stato.textContent = errore.message;
+        } finally {
+          trova("password").value = "";
+          trova("entra").disabled = false;
+        }
+      });
+
+      async function decidi(autorizza) {
+        trova("autorizza").disabled = true;
+        trova("nega").disabled = true;
+        try {
+          const opzioni = { skipBrowserRedirect: true };
+          const { data, error } = autorizza
+            ? await supabase.auth.oauth.approveAuthorization(authorizationId, opzioni)
+            : await supabase.auth.oauth.denyAuthorization(authorizationId, opzioni);
+
+          if (error || !data?.redirect_url) {
+            throw new Error(error?.message || "Indirizzo di ritorno mancante.");
+          }
+          tornaAlClient(data.redirect_url);
+        } catch (errore) {
+          stato.textContent = errore.message;
+          trova("autorizza").disabled = false;
+          trova("nega").disabled = false;
+        }
+      }
+
+      trova("autorizza").addEventListener("click", () => decidi(true));
+      trova("nega").addEventListener("click", () => decidi(false));
+    }
+
+    avvia().catch(() => {
+      stato.textContent = "Impossibile caricare la pagina di autorizzazione.";
+    });
+  </script>
+</body>
+</html>

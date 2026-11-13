@@ -1,0 +1,13 @@
+﻿.env
+.env.*
+**/__pycache__/
+**/node_modules/
+**/.venv/
+**/venv/
+*.pyc
+.DS_Store
+Thumbs.db
+chiavi*.txt
+*client_secret*
+*.apps.googleusercontent.com.json
+supabase/.temp/

@@ -1,0 +1,18 @@
+﻿{
+    "sorgenti":  {
+                     "supabase\\functions\\temacase-telegram\\ai-interprete.ts":  {
+                                                                                      "dopo":  "20EC3F6A8AD36B8783147C1E8C76B2822ABA7B09C6858CF6F2F0EB851DDCEFF2",
+                                                                                      "prima":  "20EC3F6A8AD36B8783147C1E8C76B2822ABA7B09C6858CF6F2F0EB851DDCEFF2"
+                                                                                  },
+                     "supabase\\functions\\temacase-google-auth\\index.ts":  {
+                                                                                 "dopo":  "3EC19945E7D19FC271270E8BD1B63BB168EFEB77A6098609017480A2ABE31F1E",
+                                                                                 "prima":  "3EC19945E7D19FC271270E8BD1B63BB168EFEB77A6098609017480A2ABE31F1E"
+                                                                             },
+                     "supabase\\functions\\temacase-telegram\\index.ts":  {
+                                                                              "dopo":  "B270739F4A0AEC407EA36A151FC538C2779D0C1C5F18EB02633627F5A6B7DB07",
+                                                                              "prima":  "527936C1F83FA2893E268BC2A5ED8C2E2A77AF11AE1E06693A9B434F69CDBD85"
+                                                                          }
+                 },
+    "creato":  "2026-11-12T16:11:45.5110726+01:00",
+    "versione":  "v38"
+}
