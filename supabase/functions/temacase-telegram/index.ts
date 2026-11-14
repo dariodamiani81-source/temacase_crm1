@@ -6519,12 +6519,13 @@ async function schedaHub(id: number, tipo: string, scheda: string): Promise<Risp
     const c = await crmLeggi(id, scheda);
     if (!c) return "Contatto non disponibile.";
     return {
-      text: `Attività e immobili · ${crmNome(c)} · #${scheda}`,
+      text: `Visite e immobili · ${crmNome(c)} · #${scheda}\n\nPer un immobile già visto: Registra visita. Scegli l’immobile, la data e l’ora in calendario, l’esito e poi il follow-up.`,
       inline_keyboard: [
-        ...g24Righe(scheda),
-        [opBtn("Proposte e follow-up", `t:g:ac:${scheda}`)],
-        [opBtn("Immobili e visite", `t:o:r:${scheda}`)],
-        [g35B("Immobili collegati (privati)", "properties", "p", scheda)],
+        [opBtn("Registra visita", `t:g:bv:${scheda}`)],
+        [opBtn("Visite già registrate", `t:o:r:${scheda}`)],
+        [opBtn("Follow-up e proposte", `t:g:ac:${scheda}`)],
+        [opBtn("Assegna un ruolo", `t:g:b3:${scheda}`)],
+        [g35B("Immobili collegati privati", "properties", "p", scheda)],
         [opBtn("Torna al contatto", `t:view:${scheda}`)],
       ],
     };
@@ -6579,7 +6580,7 @@ async function schedaHub(id: number, tipo: string, scheda: string): Promise<Risp
           [opBtn("Ruoli negli immobili", `q65:i:${scheda}`)],
         ] : []),
         [opBtn("Notizie collegate", `t:o:n:${scheda}`)],
-        [opBtn("Immobili e visite", `t:o:r:${scheda}`)],
+        [opBtn("Visite già registrate", `t:o:r:${scheda}`)],
         [opBtn("Torna al contatto", `t:view:${scheda}`)],
       ],
     };
@@ -6587,8 +6588,9 @@ async function schedaHub(id: number, tipo: string, scheda: string): Promise<Risp
   if (tipo === "imm") {
     if (!(await g24Immobile(id, scheda))) return "Immobile non disponibile.";
     return {
-      text: `Immobile #${scheda} · Attività e visite`,
+      text: `Immobile #${scheda} · Attività e visite\n\nRegistra visita svolta collega il contatto, mette la visita in calendario e chiede l’esito. Il follow-up si aggiunge subito dopo.`,
       inline_keyboard: [
+        [opBtn("Registra visita svolta", `t:g:iv:${scheda}`)],
         ...g24Righe(undefined, scheda),
         [opBtn("Proposte e follow-up", `t:g:ai:${scheda}`)],
         [opBtn("Visitatori e visite svolte", `t:o:v:${scheda}`)],
@@ -7068,12 +7070,12 @@ async function crmSchedaV23(id: number, contatto: string): Promise<RispostaBot> 
   if (typeof r==='string') return r;
 
   r.inline_keyboard.unshift(
-    [opBtn('Immobili e visite',`t:o:r:${contatto}`)],
+    [opBtn('Visite già registrate',`t:o:r:${contatto}`)],
     [opBtn('Notizie collegate (private)',`t:o:n:${contatto}`)],
   );
 
   r.inline_keyboard.unshift([g35B('Immobili collegati (privati)','properties','p',contatto)]);
-  r.text+='\n\nApri “Immobili e visite” per i collegamenti operativi condivisi.';
+  r.text+='\n\nApri “Visite già registrate” per i collegamenti operativi condivisi.';
   return r;
 }
 
@@ -7223,11 +7225,11 @@ async function opRelazioni(
   const page=rows.slice(0,8);
 
   return {
-    text:`Immobili del contatto #${contatto}\n\n`+(
+    text:`Immobili visti e collegati · contatto #${contatto}\n\n`+(
       page.map(i=>
-        `#${i.id} · ${String(i.indirizzo).slice(0,160)}\n${i.ruoli||'Nessun ruolo registrato'} · Visite svolte: ${i.svolte}`
+        `#${i.id} · ${String(i.indirizzo).slice(0,160)}\n${i.ruoli||'Nessun ruolo'} · Visite svolte: ${i.svolte}`
       ).join('\n\n')||
-      'Nessun collegamento operativo. Le visite storiche compaiono dopo il collegamento al cliente storico.'
+      'Nessuna visita registrata. Usa Registra visita per scegliere l’immobile, metterlo in calendario e indicare l’esito.'
     ),
     inline_keyboard:[
       ...page.map(i=>[
@@ -7237,6 +7239,8 @@ async function opRelazioni(
       ...(rows.length>8
         ? [[opBtn('Altri immobili',`t:o:r:${contatto}:${page.at(-1).id}`)]]
         : []),
+      [opBtn('Registra visita',`t:g:bv:${contatto}`)],
+      [opBtn('Torna al contatto',`t:view:${contatto}`)],
     ],
   };
 }
@@ -7860,9 +7864,11 @@ type G24 = {
  data?:string; ora?:string; importo?:number; ruolo?:string;
  descrizione?:string; svolta?:boolean; cliente?:string;
  nuovo?:boolean; legacyok?:boolean; atteso_c?:Campi; atteso_i?:Campi;
+ visionato?:boolean;
 };
 const g24Tipi=['visita','proposta','followup','ruolo'];
-const g24Nomi:Record<string,string>={visita:'Nuova visita',proposta:'Nuova proposta',followup:'Nuovo follow-up',ruolo:'Collega immobile'};
+const g24Nomi:Record<string,string>={visita:'Nuova visita',proposta:'Nuova proposta',followup:'Nuovo follow-up',ruolo:'Assegna un ruolo'};
+const g24Esiti=['Interessato','Da richiamare','Non interessato','Seconda visita','Proposta'];
 
 async function g24Stato(id:number,s:G24):Promise<string> {
  return await crmAttendi(id,{fase:'g24',valori:{...s}});
@@ -8095,7 +8101,7 @@ async function rqApri(id: number, richiesta: string): Promise<RispostaBot> {
    ...rqRighe(b),
    visti.length
     ? 'Immobili segnati: ' + visti.map(v => `#${v.id} ${v.indirizzo} (${rqEsiti[v.esito] || v.esito})`).join('; ')
-    : 'Immobili segnati: nessuno. Le visite in calendario restano in Attività e immobili.',
+    : 'Immobili segnati: nessuno. Le visite in calendario restano in Visite e immobili.',
   ].join('\n'),
   inline_keyboard: [
    ...(tuo && row.stato !== 'annullata' ? [[opBtn('Segna un immobile', `t:rq:imm:${row.id}`)]] : []),
@@ -8376,13 +8382,13 @@ async function crmScheda(id:number,n:string):Promise<RispostaBot> {
   [opBtn('Modifica dati',`t:edit:${n}`)],
   [opBtn('Richieste di ricerca',`t:rq:list:${n}`)],
   [opBtn('Collegamenti',`t:hub:col:${n}`)],
-  [opBtn('Attività e immobili',`t:hub:att:${n}`)],
+  [opBtn('Visite e immobili',`t:hub:att:${n}`)],
   [opBtn(c.visibilita==='privato'?'Condividi con agenzia':'Rendi privato',`t:share:${n}`)],
   [opBtn(c.archiviato?'Riattiva':'Archivia',`t:archive:${n}`)],
  ]:[
   [opBtn('Richieste di ricerca',`t:rq:list:${n}`)],
   [opBtn('Notizie collegate',`t:o:n:${n}`)],
-  [opBtn('Immobili e visite',`t:o:r:${n}`)],
+  [opBtn('Visite già registrate',`t:o:r:${n}`)],
  ];
  return r;
 }
@@ -8595,17 +8601,36 @@ async function g24AvantiBase26(id:number,s:G24):Promise<RispostaBot> {
   manca.push('il ruolo: '+opRuoli.join(', '));
  }
 
+ if(manca.length) {
+  const keyManca=await g24Stato(id,{
+   ...s,
+   step:'dettagli',
+   atteso_c:crmSnapshot(c),
+   atteso_i:Object.fromEntries(Object.entries(i).filter(([k])=>k!=='id'))
+  });
+  return {
+   text:`${g24Nomi[s.tipo]}\n${crmNome(c)} · ${i.indirizzo}\n\nScrivi o detta ${manca.join(' e ')}.\nEsempio: ${s.visionato?'“ieri alle 15”':'“Domani alle 15”'}. /annulla per uscire.`,
+   inline_keyboard:[[opBtn('Annulla',`t:g:no:${keyManca}`)]]
+  };
+ }
+
+ if(s.tipo==='visita'&&(s.visionato||s.svolta)&&!s.descrizione?.trim()){
+  const keyEsito=await g24Stato(id,{...s,step:'esito',svolta:true,atteso_c:crmSnapshot(c),atteso_i:Object.fromEntries(Object.entries(i).filter(([k])=>k!=='id'))});
+  return {
+   text:`Esito della visita\n${crmNome(c)} · ${i.indirizzo}, ${i.comune}\n${s.data} alle ${s.ora}\n\nScegli com'è andata. Dopo il salvataggio potrai aggiungere il follow-up.`,
+   inline_keyboard:[
+    ...g24Esiti.map((e,j)=>[opBtn(e,`t:g:es:${keyEsito}:${j}`)]),
+    [opBtn('Annulla',`t:g:no:${keyEsito}`)],
+   ],
+  };
+ }
+
  const key=await g24Stato(id,{
   ...s,
-  step:manca.length?'dettagli':'conferma',
+  step:'conferma',
   atteso_c:crmSnapshot(c),
   atteso_i:Object.fromEntries(Object.entries(i).filter(([k])=>k!=='id'))
  });
-
- if(manca.length) return {
-  text:`${g24Nomi[s.tipo]}\n${crmNome(c)} · ${i.indirizzo}\n\nScrivi o detta ${manca.join(' e ')}.\nEsempio: “Domani alle 15”. /annulla per uscire.`,
-  inline_keyboard:[[opBtn('Annulla',`t:g:no:${key}`)]]
- };
 
  return {
   text:`Conferma · ${g24Nomi[s.tipo]}\nContatto: ${crmNome(c)}\nImmobile: ${i.indirizzo}, ${i.comune}\n`+
@@ -8616,7 +8641,7 @@ async function g24AvantiBase26(id:number,s:G24):Promise<RispostaBot> {
    (s.tipo==='proposta'
     ? `Importo: ${new Intl.NumberFormat('it-IT',{style:'currency',currency:'EUR'}).format(s.importo!)}\nÈ la registrazione della proposta, non un’accettazione.\n`:'')+
    (s.tipo==='ruolo'?`Ruolo: ${s.ruolo}\n`:'')+
-   (s.descrizione?`Dettagli: ${s.descrizione}\n`:'')+
+   (s.tipo==='visita'&&s.descrizione?`Esito: ${s.descrizione}\n`:s.descrizione?`Dettagli: ${s.descrizione}\n`:'')+
    (s.tipo==='visita'&&s.nuovo
     ? 'Verrà creata la corrispondente scheda cliente per registrare la visita.\n':'')+
    (s.tipo==='visita'&&s.cliente
@@ -8723,7 +8748,7 @@ async function g24Attivita(
  const page=rows.slice(0,8);
 
  return {
-  text:'Proposte e follow-up\n\n'+(
+  text:'Follow-up e proposte\n\n'+(
    page.map(a=>
     `${a.tipo==='proposta'?'Proposta':'Follow-up'} · ${a.stato}\n${crmNome(a).slice(0,90)} · ${String(a.indirizzo).slice(0,120)}\n${a.quando?opData(a.quando):''}${a.importo?' · € '+a.importo:''}\n${String(a.descrizione).slice(0,160)}`
    ).join('\n\n')||'Nessuna attività registrata.'
@@ -8735,7 +8760,9 @@ async function g24Attivita(
    ]),
    ...(rows.length>8
     ? [[opBtn('Altre attività',`t:g:${contatto?'pc':'pi'}:${contatto||immobile}:${page.at(-1).chiave}`)]]
-    : [])
+    : []),
+   ...(contatto?[[opBtn('Torna al contatto',`t:view:${contatto}`)]]:[]),
+   ...(!contatto&&immobile?[[opBtn('Torna all’immobile',`t:o:i:${immobile}`)]]:[]),
   ]
  };
 }
@@ -8758,6 +8785,15 @@ async function g24Pulsante(cb:any,token:string):Promise<void> {
     ...(a[0]==='b'?{contatto:b}:{immobile:b})
    });
 
+  } else if(a==='bv'&&opId(b||'')) {
+   await annullaTuttoTelegram(id);
+   r=await g24Avanti(id,{tipo:'visita',contatto:b,visionato:true,svolta:true});
+  } else if(a==='iv'&&opId(b||'')) {
+   await annullaTuttoTelegram(id);
+   r=await g24Avanti(id,{tipo:'visita',immobile:b,visionato:true,svolta:true});
+  } else if(a==='bf'&&opId(b||'')&&opId(c||'')) {
+   await annullaTuttoTelegram(id);
+   r=await g24Avanti(id,{tipo:'followup',contatto:b,immobile:c});
   } else if(['ac','ai','pc','pi'].includes(a)&&opId(b||'')&&(!c||opId(c))) {
    r=await g24Attivita(
     id,a.endsWith('c')?b:undefined,a.endsWith('i')?b:undefined,c
@@ -8794,6 +8830,8 @@ async function g24Pulsante(cb:any,token:string):Promise<void> {
     } else if(a==='ed') {
      await g24Stato(id,{...s,step:'dettagli'});
      r='Scrivi o detta le modifiche a data, ora, importo, ruolo o descrizione. /annulla per uscire.';
+    } else if(a==='es'&&s.step==='esito'&&g24Esiti[Number(c)]) {
+     r=await g24Avanti(id,{...s,descrizione:g24Esiti[Number(c)],svolta:true});
     }
    }
   }
@@ -8902,11 +8940,18 @@ async function g24Registra(id:number,key:string):Promise<RispostaBot> {
  const se=await crmSessione(id);const s=se?.stato.valori as G26|undefined;
  if(se?.chiave!==key||se.stato.fase!=='g24'||s?.step!=='conferma')return 'Operazione scaduta o già eseguita.';
  const r=await crmDb<any>(id,async db=>(await db`SELECT temacase_test.crm26_salva(${key}::uuid) AS r`)[0].r);
+ const seguito=s?.tipo==='visita'&&opId(String(s.contatto||''))&&opId(String(s.immobile||''))
+  ? [opBtn('Aggiungi follow-up',`t:g:bf:${s.contatto}:${s.immobile}`)] : null;
+ const conSeguito=(base:RispostaBot):RispostaBot=>{
+  if(!seguito||!r.tipo)return base;
+  if(typeof base==='string')return {text:base,inline_keyboard:[seguito]};
+  return {...base,inline_keyboard:[seguito, ...(base.inline_keyboard||[])]};
+ };
  if(r.google_operazione){
-  try {const g=await ggChiama(id,'sync',{id:r.google_operazione});return typeof g==='string'?{text:'Attività CRM registrata. '+g+'\nControlla Prove e invii CRM prima di ricreare lattività.',inline_keyboard:[[opBtn('Prove e invii CRM','t:gm:q')]]}:{...g,text:'Attività CRM registrata.\n\n'+g.text};}
-  catch{return {text:'Attività CRM registrata; invio Google non confermato. Controlla Prove e invii CRM prima di ripetere.',inline_keyboard:[[opBtn('Prove e invii CRM','t:gm:q')]]};}
+  try {const g=await ggChiama(id,'sync',{id:r.google_operazione});return conSeguito(typeof g==='string'?{text:'Attività CRM registrata. '+g+'\nControlla Prove e invii CRM prima di ricreare lattività.',inline_keyboard:[[opBtn('Prove e invii CRM','t:gm:q')]]}:{...g,text:'Attività CRM registrata.\n\n'+g.text});}
+  catch{return conSeguito({text:'Attività CRM registrata; invio Google non confermato. Controlla Prove e invii CRM prima di ripetere.',inline_keyboard:[[opBtn('Prove e invii CRM','t:gm:q')]]});}
  }
- return {text:r.messaggio,inline_keyboard:r.tipo?[[opBtn('Apri contatto',`t:view:${s.contatto}`),opBtn('Apri immobile',`t:o:i:${s.immobile}`)]]:[]};
+ return conSeguito({text:r.messaggio,inline_keyboard:r.tipo?[[opBtn('Apri contatto',`t:view:${s!.contatto}`),opBtn('Apri immobile',`t:o:i:${s!.immobile}`)]]:[]});
 }
 async function gmPulsante(cb:any,token:string):Promise<void> {
  await telegramPost(token,'answerCallbackQuery',{callback_query_id:cb.id});const id=cb.from?.id;
