@@ -1680,6 +1680,7 @@ async function leggiSchedaNotiziaBase32(telegramId: number, id: string): Promise
         stato
       FROM temacase_test.followup_acquisizione
       WHERE notizia_id = ${id}::bigint
+        AND stato <> 'annullato'
       ORDER BY id DESC
       LIMIT 6
     `;
@@ -1752,6 +1753,7 @@ async function leggiSchedaNotiziaBase32(telegramId: number, id: string): Promise
       JOIN temacase_test.crm_attivita_personali a ON a.id=l.personale_id
       WHERE l.notizia_id=${id}::bigint AND l.consulente_telegram_id=${telegramId}
         AND a.consulente_telegram_id=${telegramId}
+        AND a.stato <> 'annullato'
       ORDER BY a.scadenza_data DESC NULLS LAST,a.id LIMIT 15`;
     const attivita = [
       ...followup.slice(0, 5).map((f) =>
@@ -8571,7 +8573,8 @@ async function fn28Elenco(id:number,offset:number):Promise<RispostaBot>{
   AND m.consulente_telegram_id=${id} AND m.attivo)
  )
  SELECT * FROM elenco
- ORDER BY quando DESC NULLS LAST,tipo,id LIMIT 9 OFFSET ${offset}`;});
+ ORDER BY CASE WHEN stato IN ('aperto','programmata') THEN 0 WHEN stato IN ('annullato','annullata') THEN 2 ELSE 1 END,
+  quando DESC NULLS LAST,tipo,id LIMIT 9 OFFSET ${offset}`;});
  const pagina=rows.slice(0,8);
  const buttons:any[][]=[];
  for(const r of pagina){
@@ -8580,6 +8583,10 @@ async function fn28Elenco(id:number,offset:number):Promise<RispostaBot>{
    {text:'Descrizione',callback_data:`m:fu:${r.notizia}:${r.id}:testo`},
    {text:'Stato',callback_data:`m:fu:${r.notizia}:${r.id}:stato`}
   ]);
+  const azioni=[];
+  if(['aperto','programmata'].includes(r.stato))azioni.push({text:`Completa #${r.id}`,callback_data:`t:fn:ask:c:${r.tipo}:${r.id}`});
+  if(!['annullato','annullata'].includes(r.stato))azioni.push({text:`Elimina #${r.id}`,callback_data:`t:fn:ask:e:${r.tipo}:${r.id}`});
+  if(azioni.length)buttons.push(azioni);
  }
  const nav=[];
  if(offset>0)nav.push({
@@ -8592,11 +8599,62 @@ async function fn28Elenco(id:number,offset:number):Promise<RispostaBot>{
  if(nav.length)buttons.push(nav);
  return {
   text:'Attivita CRM - pagina '+(offset/8+1)+
-   '\nNotizie private e attivita operative accessibili. Stati attuali; non un registro delle modifiche.\n\n'+
+   '\nCompleta e Elimina aggiornano il CRM e, se il task è su Google, anche Google. Le attività annullate restano nello storico.\n\n'+
    (pagina.map(r=>
     `${r.tipo} #${r.id} - ${r.stato}\n${String(r.titolo||'').slice(0,140)}\n${r.quando?new Date(r.quando).toLocaleString('it-IT',{timeZone:'Europe/Rome'}):'Senza scadenza'}\n${r.contesto}${r.google?'\nGoogle: '+String(r.google).slice(0,180):''}`
    ).join('\n\n')||'Nessuna attivita registrata.'),
   inline_keyboard:buttons
+ };
+}
+async function fn28InvioGoogle(id:number,tipo:string,fonteId:string){
+ return crmDb<any>(id,async q=>(await q`
+  SELECT o.id::text,d.tipo AS gtipo
+  FROM temacase_test.crm_google_invii o
+  JOIN temacase_test.crm_google_destinazioni d ON d.id=o.destinazione
+  WHERE o.fonte=${tipo} AND o.fonte_id=${fonteId}::bigint
+   AND o.consulente_telegram_id=${id}
+   AND o.stato='sincronizzato' AND o.google_id IS NOT NULL
+  ORDER BY o.creato_il DESC LIMIT 1`)[0]);
+}
+function fn28Chiedi(modo:string,tipo:string,fonteId:string):RispostaBot{
+ const tipi=['notizia','personale','followup','visita'];
+ if(!['c','e'].includes(modo)||!tipi.includes(tipo)||!idSchedaValido(fonteId))return 'Attività non valida.';
+ const verbo=modo==='c'?'completare':'eliminare';
+ return {
+  text:`Confermi di ${verbo} l’attività ${tipo} #${fonteId}? Se è collegata a Google Tasks, lo stesso comando vale anche lì. La riga resta nello storico del CRM.`,
+  inline_keyboard:[
+   [{text:modo==='c'?'Completa':'Elimina',callback_data:`t:fn:go:${modo}:${tipo}:${fonteId}`}],
+   [{text:'Annulla',callback_data:'t:fn:list:0'}]
+  ]
+ };
+}
+async function fn28Esegui(id:number,modo:string,tipo:string,fonteId:string):Promise<RispostaBot>{
+ const tipi=['notizia','personale','followup','visita'];
+ if(!['c','e'].includes(modo)||!tipi.includes(tipo)||!idSchedaValido(fonteId))return 'Attività non valida.';
+ let azione:string=modo==='c'?'completa':'elimina';
+ const inv=await fn28InvioGoogle(id,tipo,fonteId);
+ let nota='';
+ if(inv&&!(azione==='completa'&&inv.gtipo==='calendario')){
+  const g=await ggChiama(id,'chiudi',{id:inv.id,modo:azione});
+  const testo=typeof g==='string'?g:g.text;
+  if(testo==='google_assente'){
+   if(azione==='completa')azione='elimina';
+   nota=' Su Google non c’è più: nel CRM la segno annullata.';
+  }else if(testo!=='google_ok'){
+   return 'Google non aggiornato ('+String(testo).slice(0,180)+'). Lo stato nel CRM non è stato modificato. Riapri l’elenco attività.';
+  }else nota=azione==='elimina'?' Eliminata anche da Google.':' Segnata completata anche su Google.';
+ }else if(inv&&azione==='completa'){
+  nota=' L’appuntamento resta sul calendario: Google non ha uno stato completato per gli eventi.';
+ }
+ const stato=await crmDb<string>(id,async q=>(await q`
+  SELECT temacase_test.crm_chiudi_attivita(${tipo},${fonteId}::bigint,${azione}) AS r`)[0].r);
+ const frase:Record<string,string>={
+  completato:'completata',annullato:'annullata',concluso:'conclusa',svolta:'svolta',
+  annullata:'annullata',invariato:'già aggiornata',assente:'non disponibile',non_valida:'non modificabile da questo stato'
+ };
+ return {
+  text:`Attività ${tipo} #${fonteId}: ${frase[stato]||stato}.${nota}`,
+  inline_keyboard:[[{text:'Elenco attività',callback_data:'t:fn:list:0'}]]
  };
 }
 async function fn28Pulsante(cb:any,token:string):Promise<void>{
@@ -8604,10 +8662,13 @@ async function fn28Pulsante(cb:any,token:string):Promise<void>{
  const id=cb.from?.id;
  if(cb.message?.chat?.type!=='private'||
  cb.message.chat.id!==id||!await trovaProfilo(id))return;
- const [,,a,k]=String(cb.data||'').split(':');
+ const parti=String(cb.data||'').split(':');
+ const a=parti[2],k=parti[3];
  let r:RispostaBot='Scelta scaduta.';
  try{
-  if(a==='new'&&idSchedaValido(k||'')){
+  if(a==='ask'||a==='go'){
+   r=a==='ask'?fn28Chiedi(parti[3]||'',parti[4]||'',parti[5]||''):await fn28Esegui(id,parti[3]||'',parti[4]||'',parti[5]||'');
+  }else if(a==='new'&&idSchedaValido(k||'')){
    r=await fn28Apri(id,k);
   }else if(a==='list'&&/^\d{1,5}$/.test(k||'')){
    r=await fn28Elenco(id,Number(k));
@@ -8622,8 +8683,11 @@ async function fn28Pulsante(cb:any,token:string):Promise<void>{
     r='Creazione annullata.';
    }
   }
- }catch{
-  r='Operazione non confermata. Riapri la notizia e controlla i follow-up prima di ripetere.';
+ }catch(e){
+  console.error('fn28',e instanceof Error?e.name:'errore');
+  r=(a==='ask'||a==='go')
+   ?'Operazione non confermata. Riapri l’elenco attività e controlla lo stato prima di ripetere.'
+   :'Operazione non confermata. Riapri la notizia e controlla i follow-up prima di ripetere.';
  }
  await inviaRisposta(token,id,r);
 }
