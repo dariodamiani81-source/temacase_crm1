@@ -5541,6 +5541,15 @@ Deno.serve(async (request) => {
         }
       }
     }
+    // Richieste di ricerca: la frase scritta o dettata resta in questo flusso.
+    if(!haFoto&&!haPdf&&typeof message.text==='string'&&message.text.trim()&&!message.text.trim().startsWith('/')){
+      const sessioneRichieste=await crmSessione(telegramId);
+      if(String(sessioneRichieste?.stato.fase||'').startsWith('rq_')){
+        const esitoRichieste=await rqRicevi(telegramId,message.text.trim(),sessioneRichieste as CrmSessione);
+        await inviaRisposta(botToken,message.chat.id,esitoRichieste);
+        return new Response('OK');
+      }
+    }
     // V59: allegati solo dopo "Aggiungi allegato" nella scheda Notizia.
     if(haFoto||haPdf){
       const allegato59=await allegati59Messaggio(telegramId,message,update.update_id);
@@ -6552,6 +6561,24 @@ async function schedaHub(id: number, tipo: string, scheda: string): Promise<Risp
       ],
     };
   }
+  if (tipo === "col") {
+    const c = await crmLeggi(id, scheda);
+    if (!c) return "Contatto non disponibile.";
+    const tuo = String(c.consulente_telegram_id) === String(id);
+    return {
+      text: `Collegamenti · ${crmNome(c)} · #${scheda}\nNotizie, ruoli e immobili collegati a questo contatto.`,
+      inline_keyboard: [
+        ...(tuo ? [
+          [opBtn("Collega a una notizia", `q65:ns:${scheda}`)],
+          [opBtn("Ruoli nelle notizie", `q65:n:${scheda}`)],
+          [opBtn("Ruoli negli immobili", `q65:i:${scheda}`)],
+        ] : []),
+        [opBtn("Notizie collegate", `t:o:n:${scheda}`)],
+        [opBtn("Immobili e visite", `t:o:r:${scheda}`)],
+        [opBtn("Torna al contatto", `t:view:${scheda}`)],
+      ],
+    };
+  }
   if (tipo === "imm") {
     if (!(await g24Immobile(id, scheda))) return "Immobile non disponibile.";
     return {
@@ -6574,6 +6601,7 @@ async function crmPulsante(
   callback: any,
   botToken: string,
 ): Promise<void> {
+  if (String(callback.data || '').startsWith('t:rq:')) { await rqPulsante(callback, botToken); return; }
   if (String(callback.data || '').startsWith('t:g35:')) { await g35Pulsante(callback,botToken);return; }
   if (String(callback.data || '').startsWith('t:g34:')) { await g34Pulsante(callback,botToken);return; }
   if (String(callback.data || '').startsWith('t:g32:')) {
@@ -6625,7 +6653,7 @@ async function crmPulsante(
   let risposta: RispostaBot =
     "Pulsante non valido o scaduto. Riapri /contatto.";
 
-  if (azione === "hub" && ["att", "nota", "doc", "imm"].includes(arg) && idSchedaValido(extra)) {
+  if (azione === "hub" && ["att", "nota", "doc", "imm", "col"].includes(arg) && idSchedaValido(extra)) {
     risposta = await schedaHub(id, arg, extra);
   } else if (azione === "view" && idSchedaValido(arg)) {
     await crmDb(id, async db =>
@@ -7849,22 +7877,505 @@ function g24Righe(contatto?:string,immobile?:string):Pulsante[][] {
  ]);
 }
 
+const rqStati: Record<string, string> = {
+ aperta: 'Aperta', sospesa: 'Sospesa', soddisfatta: 'Soddisfatta', annullata: 'Annullata',
+};
+const rqStatoSigla: Record<string, string> = { a: 'aperta', s: 'sospesa', f: 'soddisfatta', x: 'annullata' };
+const rqStabili: Record<string, string> = {
+ ringhiera: 'Ringhiera', civile: 'Civile', signorile: 'Signorile', economico: 'Economico', altro: 'Altro',
+};
+const rqEsiti: Record<string, string> = {
+ proposto: 'Proposto', visto: 'Visto', scartato: 'Scartato', trattativa: 'In trattativa',
+};
+
+type RqBozza = {
+ operazione: 'acquisto' | 'locazione' | null;
+ zone: string[];
+ tipologia: string | null;
+ mq_min: number | null;
+ mq_max: number | null;
+ tipo_stabile: string | null;
+ budget_max: number | null;
+ note: string | null;
+};
+
+function rqTesto(v: unknown, n: number): string | null {
+ const s = String(v ?? '').replace(/\s+/g, ' ').trim().slice(0, n);
+ return s || null;
+}
+
+function rqIntero(v: unknown): number | null {
+ if (v == null || v === '') return null;
+ const n = typeof v === 'number' ? v : Number(String(v).replace(/\./g, '').replace(',', '.'));
+ if (!Number.isFinite(n)) return null;
+ const i = Math.round(n);
+ return i >= 1 && i <= 100000 ? i : null;
+}
+
+function rqBudget(v: unknown): number | null {
+ if (v == null || v === '') return null;
+ const n = typeof v === 'number' ? v : Number(String(v).replace(/\./g, '').replace(',', '.'));
+ if (!Number.isFinite(n) || n < 0 || n > 999999999999) return null;
+ return Math.round(n * 100) / 100;
+}
+
+function rqZone(v: unknown): string[] {
+ const lista = Array.isArray(v) ? v : typeof v === 'string' ? v.split(/[,;]|\s+e\s+/i) : [];
+ const viste = new Set<string>();
+ const out: string[] = [];
+ for (const x of lista) {
+  const z = String(x || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  const k = z.toLocaleLowerCase('it');
+  if (z.length < 2 || viste.has(k)) continue;
+  viste.add(k);
+  out.push(z);
+  if (out.length >= 8) break;
+ }
+ return out;
+}
+
+function rqBozza(p: Campi): RqBozza {
+ const op = String(p.operazione || '').toLowerCase();
+ let mqMin = rqIntero(p.mq_min);
+ let mqMax = rqIntero(p.mq_max);
+ if (mqMin && mqMax && mqMin > mqMax) [mqMin, mqMax] = [mqMax, mqMin];
+ const stabile = String(p.tipo_stabile || '').toLowerCase();
+ return {
+  operazione: /locaz|affitt/.test(op) ? 'locazione' : /acquist|compr/.test(op) ? 'acquisto' : null,
+  zone: rqZone(p.zone),
+  tipologia: rqTesto(p.tipologia, 80),
+  mq_min: mqMin,
+  mq_max: mqMax,
+  tipo_stabile: rqStabili[stabile] ? stabile : null,
+  budget_max: rqBudget(p.budget_max),
+  note: rqTesto(p.note, 1000),
+ };
+}
+
+function rqEuro(n: number): string {
+ return new Intl.NumberFormat('it-IT', { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 }).format(n);
+}
+
+function rqMetri(b: RqBozza): string | null {
+ if (b.mq_min && b.mq_max) return b.mq_min === b.mq_max ? `${b.mq_min} mq` : `${b.mq_min}–${b.mq_max} mq`;
+ if (b.mq_min) return `da ${b.mq_min} mq`;
+ if (b.mq_max) return `fino a ${b.mq_max} mq`;
+ return null;
+}
+
+function rqRighe(b: RqBozza): string[] {
+ return [
+  `Operazione: ${b.operazione === 'locazione' ? 'Locazione' : b.operazione === 'acquisto' ? 'Acquisto' : 'Da indicare'}`,
+  `Zone: ${b.zone.length ? b.zone.join(', ') : 'Non indicate'}`,
+  `Tipologia: ${b.tipologia || 'Non indicata'}`,
+  `Metri quadri: ${rqMetri(b) || 'Non indicati'}`,
+  `Stabile: ${b.tipo_stabile ? rqStabili[b.tipo_stabile] : 'Non indicato'}`,
+  `Budget massimo: ${b.budget_max != null ? rqEuro(b.budget_max) : 'Non indicato'}`,
+  ...(b.note ? [`Note: ${b.note}`] : []),
+ ];
+}
+
+function rqEtichetta(parti: Array<string | null | undefined>): string {
+ return parti.filter(Boolean).join(' · ').slice(0, 60);
+}
+
+async function rqChiudi(id: number): Promise<void> {
+ await crmDb(id, async db => {
+  await db`
+   DELETE FROM temacase_test.crm_sessioni_telegram
+   WHERE consulente_telegram_id = ${id}
+     AND stato->>'fase' LIKE 'rq_%'
+  `;
+ });
+}
+
+async function rqEstrai(testo: string): Promise<RqBozza> {
+ const key = Deno.env.get('TEMACASE_OPENAI_API_KEY');
+ if (!key) throw new Error('interprete_configurazione');
+ const p = await jsonOpenAI(testo, 'Estrai una richiesta immobiliare. Rispondi solo JSON con operazione (acquisto, locazione o null), zone (array di quartieri o comuni, senza il comando), tipologia (bilocale, ufficio o null), mq_min, mq_max, tipo_stabile (ringhiera, civile, signorile, economico, altro o null), budget_max (euro, numero, o null) e note (solo dettagli che non stanno negli altri campi, o null). Affitto vale locazione. Compra vale acquisto. Casa di ringhiera vale ringhiera. Se c’è un solo valore di metri quadri, usa lo stesso numero in mq_min e mq_max. Non inventare dati assenti.', key);
+ return rqBozza(p);
+}
+
+async function rqConteggio(id: number, contatto: string): Promise<number> {
+ const r = await crmDb<Array<{ n: number }>>(id, async db => db`
+  SELECT count(*)::int AS n
+  FROM temacase_test.crm_richieste
+  WHERE contatto_id = ${contatto}::bigint AND stato = 'aperta'
+ `);
+ return Number(r[0]?.n || 0);
+}
+
+async function rqElenco(id: number, contatto?: string): Promise<RispostaBot> {
+ const righe = await crmDb<any[]>(id, async db => contatto
+  ? db`
+   SELECT r.id::text, r.operazione, r.stato, r.tipologia, r.budget_max
+   FROM temacase_test.crm_richieste r
+   WHERE r.contatto_id = ${contatto}::bigint
+   ORDER BY (r.stato = 'aperta') DESC, r.id DESC
+   LIMIT 8
+  `
+  : db`
+   SELECT r.id::text, r.operazione, r.stato, r.tipologia, r.budget_max,
+          c.nome, c.cognome, c.ragione_sociale, c.tipo_soggetto
+   FROM temacase_test.crm_richieste r
+   JOIN temacase_test.crm_contatti c ON c.id = r.contatto_id
+   WHERE r.stato = 'aperta'
+   ORDER BY r.id DESC
+   LIMIT 8
+  `);
+ const c = contatto ? await crmLeggi(id, contatto) : undefined;
+ const tuo = Boolean(c && String(c.consulente_telegram_id) === String(id) && !c.archiviato);
+ return {
+  text: (contatto
+   ? `Richieste di ricerca · ${c ? crmNome(c) : 'Contatto'} · #${contatto}`
+   : 'Richieste di ricerca aperte') +
+   (righe.length ? '' : '\nNessuna richiesta.') +
+   '\nLa richiesta descrive cosa cerca il contatto. Non è un ruolo e non modifica la scheda.',
+  inline_keyboard: [
+   ...righe.map(r => [opBtn(rqEtichetta([
+    contatto ? null : crmNome(r),
+    r.stato !== 'aperta' ? rqStati[r.stato] : null,
+    r.operazione === 'locazione' ? 'Locazione' : 'Acquisto',
+    r.tipologia,
+    r.budget_max != null ? rqEuro(Number(r.budget_max)) : null,
+   ]), `t:rq:open:${r.id}`)]),
+   ...(tuo && contatto ? [[opBtn('Nuova richiesta', `t:rq:new:${contatto}`)]] : []),
+   [opBtn('Filtra le richieste', 't:rq:find:0')],
+   ...(contatto ? [[opBtn('Torna al contatto', `t:view:${contatto}`)]] : []),
+  ],
+ };
+}
+
+async function rqApri(id: number, richiesta: string): Promise<RispostaBot> {
+ if (!idSchedaValido(richiesta)) return 'Richiesta non disponibile.';
+ const righe = await crmDb<any[]>(id, async db => db`
+  SELECT r.id::text, r.contatto_id::text AS contatto, r.operazione, r.stato,
+         r.tipologia, r.mq_min, r.mq_max, r.tipo_stabile, r.budget_max, r.note,
+         r.consulente_telegram_id::text AS consulente,
+         c.nome, c.cognome, c.ragione_sociale, c.tipo_soggetto
+  FROM temacase_test.crm_richieste r
+  JOIN temacase_test.crm_contatti c ON c.id = r.contatto_id
+  WHERE r.id = ${richiesta}::bigint
+ `);
+ const row = righe[0];
+ if (!row) return 'Richiesta non disponibile.';
+ const zone = await crmDb<Array<{ zona: string }>>(id, async db => db`
+  SELECT zona FROM temacase_test.crm_richieste_zone
+  WHERE richiesta_id = ${richiesta}::bigint
+  ORDER BY zona
+ `);
+ const visti = await crmDb<any[]>(id, async db => db`
+  SELECT i.id::text, i.indirizzo, x.esito
+  FROM temacase_test.crm_richieste_immobili x
+  JOIN temacase_test.immobili i ON i.id = x.immobile_id
+  WHERE x.richiesta_id = ${richiesta}::bigint
+  ORDER BY x.aggiornato_il DESC
+  LIMIT 8
+ `);
+ const b: RqBozza = {
+  operazione: row.operazione,
+  zone: zone.map(z => z.zona),
+  tipologia: row.tipologia,
+  mq_min: row.mq_min,
+  mq_max: row.mq_max,
+  tipo_stabile: row.tipo_stabile,
+  budget_max: row.budget_max == null ? null : Number(row.budget_max),
+  note: row.note,
+ };
+ const tuo = String(row.consulente) === String(id);
+ return {
+  text: [
+   `Richiesta #${row.id} · ${crmNome(row)}`,
+   `Stato: ${rqStati[row.stato] || row.stato}`,
+   ...rqRighe(b),
+   visti.length
+    ? 'Immobili segnati: ' + visti.map(v => `#${v.id} ${v.indirizzo} (${rqEsiti[v.esito] || v.esito})`).join('; ')
+    : 'Immobili segnati: nessuno. Le visite in calendario restano in Attività e immobili.',
+  ].join('\n'),
+  inline_keyboard: [
+   ...(tuo && row.stato !== 'annullata' ? [[opBtn('Segna un immobile', `t:rq:imm:${row.id}`)]] : []),
+   ...(tuo ? [[opBtn('Cambia stato', `t:rq:st:${row.id}:m`)]] : []),
+   [opBtn('Torna alle richieste', `t:rq:list:${row.contatto}`)],
+   [opBtn('Torna al contatto', `t:view:${row.contatto}`)],
+  ],
+ };
+}
+
+async function rqNuova(id: number, contatto: string): Promise<RispostaBot> {
+ const c = await crmLeggi(id, contatto);
+ if (!c || String(c.consulente_telegram_id) !== String(id)) return 'Puoi registrare richieste solo sui tuoi contatti.';
+ if (c.archiviato) return 'Riattiva il contatto prima di registrare una richiesta.';
+ await annullaTuttoTelegram(id);
+ await crmAttendi(id, { fase: 'rq_testo', contatto, azione: 'richiesta' });
+ return `Nuova richiesta per ${crmNome(c)}.\nScrivi o detta in una frase operazione, zona, tipologia, metri quadri, stabile e budget.\nEsempio: cerca in acquisto un bilocale in Isola, civile, 60-80 mq, massimo 400 mila.\n/annulla per uscire.`;
+}
+
+async function rqAnteprima(id: number, contatto: string, b: RqBozza): Promise<RispostaBot> {
+ const c = await crmLeggi(id, contatto);
+ if (!c) return 'Contatto non disponibile.';
+ const chiave = await crmAttendi(id, {
+  fase: 'rq_conferma',
+  contatto,
+  azione: 'richiesta',
+  valori: {
+   operazione: b.operazione,
+   zone: b.zone,
+   tipologia: b.tipologia,
+   mq_min: b.mq_min,
+   mq_max: b.mq_max,
+   tipo_stabile: b.tipo_stabile,
+   budget_max: b.budget_max,
+   note: b.note,
+  },
+ });
+ return {
+  text: `Richiesta per ${crmNome(c)} · #${contatto}\n` + rqRighe(b).join('\n') + '\n\nSalvo solo dopo la conferma.',
+  inline_keyboard: [
+   [opBtn('Salva richiesta', `t:rq:ok:${chiave}`)],
+   [opBtn('Annulla', `t:rq:no:${chiave}`)],
+  ],
+ };
+}
+
+async function rqSalva(id: number, chiave: string): Promise<RispostaBot> {
+ const se = await crmSessione(id);
+ if (!se || se.chiave !== chiave || se.stato.fase !== 'rq_conferma' || !se.stato.contatto) {
+  return 'Questa conferma non è più valida. Riapri il contatto.';
+ }
+ const b = rqBozza(se.stato.valori || {});
+ if (!b.operazione) return 'Manca acquisto o locazione. Ripeti la richiesta.';
+ const contatto = se.stato.contatto;
+ try {
+  const creato = await crmDb<Array<{ id: string }>>(id, async db => {
+   const c = (await db`
+    SELECT agenzia_id::text
+    FROM temacase_test.crm_contatti
+    WHERE id = ${contatto}::bigint
+      AND consulente_telegram_id = ${id}
+      AND NOT archiviato
+   `)[0];
+   if (!c) return [];
+   const ins = await db`
+    INSERT INTO temacase_test.crm_richieste
+     (contatto_id, agenzia_id, consulente_telegram_id, operazione, tipologia, mq_min, mq_max, tipo_stabile, budget_max, note)
+    VALUES (
+     ${contatto}::bigint, ${c.agenzia_id}::uuid, ${id}, ${b.operazione},
+     ${b.tipologia}, ${b.mq_min}, ${b.mq_max}, ${b.tipo_stabile}, ${b.budget_max}, ${b.note}
+    )
+    RETURNING id::text
+   `;
+   for (const zona of b.zone) {
+    await db`
+     INSERT INTO temacase_test.crm_richieste_zone (richiesta_id, zona)
+     VALUES (${ins[0].id}::bigint, ${zona})
+    `;
+   }
+   await db`
+    DELETE FROM temacase_test.crm_sessioni_telegram
+    WHERE consulente_telegram_id = ${id}
+   `;
+   return ins;
+  });
+  if (!creato[0]) return 'Puoi registrare richieste solo sui tuoi contatti attivi.';
+  return rqApri(id, creato[0].id);
+ } catch (e) {
+  console.error('rq_salva', (e as { code?: string }).code || 'unknown');
+  return 'Non sono riuscito a salvare la richiesta. Controlla i dati e riprova.';
+ }
+}
+
+function rqStatoMenu(richiesta: string): RispostaBot {
+ return {
+  text: 'Scegli il nuovo stato. Annullata toglie la richiesta dagli elenchi aperti e lascia la scheda.',
+  inline_keyboard: [
+   [opBtn('Aperta', `t:rq:st:${richiesta}:a`), opBtn('Sospesa', `t:rq:st:${richiesta}:s`)],
+   [opBtn('Soddisfatta', `t:rq:st:${richiesta}:f`), opBtn('Annullata', `t:rq:st:${richiesta}:x`)],
+   [opBtn('Torna alla richiesta', `t:rq:open:${richiesta}`)],
+  ],
+ };
+}
+
+async function rqStato(id: number, richiesta: string, sigla: string): Promise<RispostaBot> {
+ const stato = rqStatoSigla[sigla];
+ if (!stato || !idSchedaValido(richiesta)) return 'Stato non disponibile.';
+ const n = await crmDb<Array<{ id: string }>>(id, async db => db`
+  UPDATE temacase_test.crm_richieste
+  SET stato = ${stato}
+  WHERE id = ${richiesta}::bigint
+    AND consulente_telegram_id = ${id}
+  RETURNING id::text
+ `);
+ if (!n[0]) return 'Puoi aggiornare solo le richieste dei tuoi contatti.';
+ return rqApri(id, richiesta);
+}
+
+async function rqChiediImmobile(id: number, richiesta: string): Promise<RispostaBot> {
+ const r = await crmDb<Array<{ contatto: string }>>(id, async db => db`
+  SELECT contatto_id::text AS contatto
+  FROM temacase_test.crm_richieste
+  WHERE id = ${richiesta}::bigint
+    AND consulente_telegram_id = ${id}
+    AND stato <> 'annullata'
+ `);
+ if (!r[0]) return 'Puoi segnare immobili solo sulle tue richieste.';
+ await annullaTuttoTelegram(id);
+ await crmAttendi(id, { fase: 'rq_visto', contatto: r[0].contatto, azione: 'richiesta', campo: richiesta });
+ return 'Scrivi l’ID dell’immobile e l’esito: visto, proposto, scartato o trattativa.\nEsempio: 12 visto\nQuesto segno resta sulla richiesta. Le visite in calendario non cambiano.\n/annulla per uscire.';
+}
+
+function rqVisto(testo: string): { immobile: string; esito: string } | null {
+ const m = /^#?\s*([1-9]\d{0,18})\s*(visto|proposta|proposto|scartato|scarta|trattativa)?[.!\s]*$/i.exec(testo.trim());
+ if (!m || !idSchedaValido(m[1])) return null;
+ const parola = (m[2] || 'visto').toLowerCase();
+ const esito = parola.startsWith('prop') ? 'proposto'
+  : parola.startsWith('scar') ? 'scartato'
+  : parola.startsWith('trat') ? 'trattativa'
+  : 'visto';
+ return { immobile: m[1], esito };
+}
+
+async function rqSegna(id: number, richiesta: string, immobile: string, esito: string): Promise<RispostaBot> {
+ const n = await crmDb<Array<{ id: string }>>(id, async db => db`
+  INSERT INTO temacase_test.crm_richieste_immobili (richiesta_id, immobile_id, esito)
+  SELECT r.id, ${immobile}::bigint, ${esito}
+  FROM temacase_test.crm_richieste r
+  WHERE r.id = ${richiesta}::bigint
+    AND r.consulente_telegram_id = ${id}
+    AND r.stato <> 'annullata'
+    AND EXISTS (
+     SELECT 1
+     FROM temacase_test.crm_immobili_agenzia a
+     JOIN temacase_test.crm_membri_agenzia m
+       ON m.agenzia_id = a.agenzia_id
+      AND m.consulente_telegram_id = ${id}
+      AND m.attivo
+     WHERE a.immobile_id = ${immobile}::bigint
+    )
+  ON CONFLICT (richiesta_id, immobile_id) DO UPDATE
+   SET esito = excluded.esito, aggiornato_il = now()
+  RETURNING richiesta_id::text AS id
+ `);
+ await rqChiudi(id);
+ if (!n[0]) return 'Immobile non disponibile, oppure la richiesta non è tua.';
+ return rqApri(id, richiesta);
+}
+
+async function rqFiltra(id: number): Promise<RispostaBot> {
+ await annullaTuttoTelegram(id);
+ await crmAttendi(id, { fase: 'rq_filtro', azione: 'richiesta' });
+ return 'Scrivi i criteri, anche solo alcuni. Esempio: Isola, bilocale, 70 mq, civile, 400 mila.\nConfronto le richieste aperte che puoi vedere. Se indichi una cifra, è il prezzo da coprire: resta in elenco chi non ha un tetto oppure può arrivare almeno a quella cifra.\n/annulla per uscire.';
+}
+
+async function rqCerca(id: number, b: RqBozza): Promise<RispostaBot> {
+ const zone = b.zone.map(z => z.replace(/[\\%_]/g, '\\$&'));
+ const tipologia = b.tipologia ? '%' + b.tipologia.replace(/[\\%_]/g, '\\$&') + '%' : null;
+ const righe = await crmDb<any[]>(id, async db => db`
+  SELECT r.id::text, r.operazione, r.tipologia, r.budget_max,
+         c.nome, c.cognome, c.ragione_sociale, c.tipo_soggetto
+  FROM temacase_test.crm_richieste r
+  JOIN temacase_test.crm_contatti c ON c.id = r.contatto_id
+  WHERE r.stato = 'aperta'
+    AND (${b.operazione}::text IS NULL OR r.operazione = ${b.operazione})
+    AND (${tipologia}::text IS NULL OR r.tipologia ILIKE ${tipologia} ESCAPE '\\')
+    AND (${b.tipo_stabile}::text IS NULL OR r.tipo_stabile = ${b.tipo_stabile})
+    AND (${b.mq_min}::int IS NULL OR r.mq_max IS NULL OR r.mq_max >= ${b.mq_min})
+    AND (${b.mq_max}::int IS NULL OR r.mq_min IS NULL OR r.mq_min <= ${b.mq_max})
+    AND (${b.budget_max}::numeric IS NULL OR r.budget_max IS NULL OR r.budget_max >= ${b.budget_max})
+    AND (
+     ${zone.length === 0}
+     OR EXISTS (
+      SELECT 1 FROM temacase_test.crm_richieste_zone z
+      WHERE z.richiesta_id = r.id
+        AND EXISTS (
+         SELECT 1 FROM unnest(${zone.length ? zone : ['']}::text[]) q
+         WHERE z.zona ILIKE '%' || q || '%' ESCAPE '\\'
+        )
+     )
+    )
+  ORDER BY r.id DESC
+  LIMIT 8
+ `);
+ await rqChiudi(id);
+ return {
+  text: 'Richieste aperte compatibili' + (righe.length ? '' : '\nNessuna richiesta copre questi criteri.') +
+   '\nLa cifra, se presente, è il prezzo da coprire: resta chi non ha un tetto oppure può arrivare almeno a quella cifra.',
+  inline_keyboard: righe.map(r => [opBtn(rqEtichetta([
+   crmNome(r),
+   r.operazione === 'locazione' ? 'Locazione' : 'Acquisto',
+   r.tipologia,
+  ]), `t:rq:open:${r.id}`)]),
+ };
+}
+
+async function rqRicevi(id: number, testo: string, se: CrmSessione): Promise<RispostaBot> {
+ if (se.stato.fase === 'rq_testo') {
+  if (!se.stato.contatto) return 'Richiesta senza contatto. Riapri la scheda.';
+  const b = await rqEstrai(testo);
+  if (!b.operazione) return 'Dimmi se è un acquisto o una locazione, insieme agli altri criteri.';
+  return rqAnteprima(id, se.stato.contatto, b);
+ }
+ if (se.stato.fase === 'rq_conferma') return 'Usa Salva richiesta oppure Annulla. /annulla esce senza salvare.';
+ if (se.stato.fase === 'rq_filtro') {
+  const b = await rqEstrai(testo);
+  const utile = Boolean(b.operazione || b.zone.length || b.tipologia || b.mq_min || b.mq_max || b.tipo_stabile || b.budget_max != null);
+  if (!utile) return 'Non ho trovato criteri. Ripeti zona, tipologia, metri, stabile o budget.';
+  return rqCerca(id, b);
+ }
+ if (se.stato.fase === 'rq_visto') {
+  const v = rqVisto(testo);
+  if (!v || !se.stato.campo) return 'Scrivi l’ID e l’esito. Esempio: 12 visto';
+  return rqSegna(id, se.stato.campo, v.immobile, v.esito);
+ }
+ return 'Richiesta non disponibile.';
+}
+
+async function rqPulsante(callback: any, botToken: string): Promise<void> {
+ const id = callback.from?.id;
+ await telegramPost(botToken, 'answerCallbackQuery', { callback_query_id: callback.id });
+ if (callback.message?.chat?.type !== 'private' || callback.message.chat.id !== id || !(await trovaProfilo(id))) return;
+ const p = String(callback.data || '').split(':');
+ const op = p[2];
+ const a = p[3] || '';
+ const b = p[4] || '';
+ let risposta: RispostaBot = 'Pulsante non valido o scaduto. Riapri il contatto.';
+ if (op === 'list' && idSchedaValido(a)) risposta = await rqElenco(id, a);
+ else if (op === 'new' && idSchedaValido(a)) risposta = await rqNuova(id, a);
+ else if (op === 'open' && idSchedaValido(a)) risposta = await rqApri(id, a);
+ else if (op === 'ok' && /^[0-9a-f-]{36}$/i.test(a)) risposta = await rqSalva(id, a);
+ else if (op === 'no' && /^[0-9a-f-]{36}$/i.test(a)) {
+  const se = await crmSessione(id);
+  if (!se || se.chiave !== a || se.stato.fase !== 'rq_conferma') risposta = 'Questa conferma non è più valida. Riapri il contatto.';
+  else {
+   const contatto = se.stato.contatto;
+   await rqChiudi(id);
+   risposta = contatto && idSchedaValido(contatto) ? await rqElenco(id, contatto) : 'Richiesta annullata.';
+  }
+ } else if (op === 'find') risposta = await rqFiltra(id);
+ else if (op === 'st' && idSchedaValido(a) && b === 'm') risposta = rqStatoMenu(a);
+ else if (op === 'st' && idSchedaValido(a)) risposta = await rqStato(id, a, b);
+ else if (op === 'imm' && idSchedaValido(a)) risposta = await rqChiediImmobile(id, a);
+ await inviaRisposta(botToken, id, risposta);
+}
+
 async function crmScheda(id:number,n:string):Promise<RispostaBot> {
  const r=await crmSchedaV22(id,n);
  if(typeof r==='string') return r;
  const c=await crmLeggi(id,n);
  if(!c) return r;
  const tuo=String(c.consulente_telegram_id)===String(id);
+ let aperte=0;
+ try { aperte = await rqConteggio(id, n); }
+ catch (e) { console.error('rq_conteggio', (e as { code?: string }).code || 'unknown'); }
+ r.text += `\nRichieste di ricerca aperte: ${aperte}`;
  r.inline_keyboard=tuo?[
   [opBtn('Modifica dati',`t:edit:${n}`)],
-  [opBtn('Collega a una notizia',`q65:ns:${n}`)],
-  [opBtn('Ruoli nelle notizie',`q65:n:${n}`)],
-  [opBtn('Ruoli negli immobili',`q65:i:${n}`)],
-  [opBtn('Notizie collegate',`t:o:n:${n}`)],
+  [opBtn('Richieste di ricerca',`t:rq:list:${n}`)],
+  [opBtn('Collegamenti',`t:hub:col:${n}`)],
   [opBtn('Attività e immobili',`t:hub:att:${n}`)],
   [opBtn(c.visibilita==='privato'?'Condividi con agenzia':'Rendi privato',`t:share:${n}`)],
   [opBtn(c.archiviato?'Riattiva':'Archivia',`t:archive:${n}`)],
  ]:[
+  [opBtn('Richieste di ricerca',`t:rq:list:${n}`)],
   [opBtn('Notizie collegate',`t:o:n:${n}`)],
   [opBtn('Immobili e visite',`t:o:r:${n}`)],
  ];
@@ -8964,6 +9475,7 @@ async function ai31Ricevi(id:number,t:string,token:string,updateId:number,vocale
  const schedaRichiesta=leggiIdScheda(t);
  if(schedaRichiesta)return leggiSchedaNotizia(id,schedaRichiesta);
  const memoria=await ai31Memoria(id),se=await crmSessione(id),mod=await sessioneAttiva(id);
+ if(!se&&!mod&&/^richieste(?:\s+di\s+ricerca)?[.!\s]*$/i.test(t.trim()))return rqElenco(id);
  const turno=await ai31Traccia(id,'user',t,[],{origine:vocale?'vocale':'testo',testo:t.slice(0,2000),esito:'interpretazione'});
  const v=se?.stato.valori||{};
  const ctx={risposta_a_bot:message.reply_to_message?.from?.is_bot?String(message.reply_to_message.text||'').slice(0,2000):null,conversazione:(memoria?.storia||[]).slice(-6).map((m:any)=>({role:m.role,content:String(m.content||'').slice(0,1000)})),campo_atteso:ai36CampoAtteso(se),bozza:se?{notizia:se.stato.notizia||null,fase:se.stato.fase,step:v.step||null,tipo:v.tipo||null,campo:se.stato.campo||v.campo||null,modulo:v.modulo||null,nome:v.nome||null,cognome:v.cognome||null,telefono:v.telefono||null,email:v.email||null,comune:v.comune||null,persona:v.persona||null,indirizzo:v.indirizzo||null,descrizione:v.descrizione||null,data:v.data||null,ora:v.ora||null,google_tipo:v.google_tipo||null,google_nome:v.google_nome||null,operazione_immobile:v.operazione_immobile||null,fase_acquisizione:v.fase_acquisizione||null,stato_commerciale:v.stato_commerciale||null,visibilita:v.visibilita||null,unita:v.unita||null,tipologia_immobile:v.tipologia_immobile||null,incarico_dal:v.incarico_dal||null,incarico_al:v.incarico_al||null,esclusiva:v.esclusiva??null}:null,
