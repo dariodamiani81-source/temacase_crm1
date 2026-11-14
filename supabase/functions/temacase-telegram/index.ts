@@ -4458,6 +4458,8 @@ async function preparaRisposta(
     const esempio = "Scrivi per esempio /notizie via Eustachi oppure /notizie 18 Milano via Eustachi.";
 
     if (!argomento) return await domandaComando(telegramId, "notizie");
+    const idNotizia = leggiIdScheda(argomento) || leggiIdScheda("notizia " + argomento);
+    if (idNotizia) return await leggiSchedaNotizia(telegramId, idNotizia);
     if (argomento.length > 300) return "Indica una sola via, con comune e civico se li conosci.";
 
     let indirizzo: Record<string, unknown>;
@@ -8933,6 +8935,8 @@ async function ai31Ricevi(id:number,t:string,token:string,updateId:number,vocale
  }
  if(t.startsWith('/'))return null;
  if(!await trovaProfilo(id))return accessoNegato;
+ const schedaRichiesta=leggiIdScheda(t);
+ if(schedaRichiesta)return leggiSchedaNotizia(id,schedaRichiesta);
  const memoria=await ai31Memoria(id),se=await crmSessione(id),mod=await sessioneAttiva(id);
  const turno=await ai31Traccia(id,'user',t,[],{origine:vocale?'vocale':'testo',testo:t.slice(0,2000),esito:'interpretazione'});
  const v=se?.stato.valori||{};
