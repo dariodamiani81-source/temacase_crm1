@@ -77,7 +77,7 @@ function leggiDettagli(valore: unknown): DettagliNotizia {
   }
 
   const attivita = oggetto(dettagli.followup);
-  const descrizione = campo(attivita.descrizione, 300);
+  const descrizione = campo(pulisciAttivita(String(attivita.descrizione || "")), 300);
   const data = dataValida(attivita.data);
   const ora = pulisci(attivita.ora);
 
@@ -8463,7 +8463,7 @@ async function fn28RiceviBase29(id:number,t:string):Promise<RispostaBot|null>{
   const apiKey=Deno.env.get('TEMACASE_OPENAI_API_KEY');
   if(!apiKey)return 'Usa il formato GG/MM/AAAA HH:MM | Attivita da svolgere.';
   try{
-   p=await jsonOpenAI(t,`Estrai un solo follow-up privato. Oggi a Roma: ${oggiARoma()}. JSON: descrizione (attivita esplicita, massimo 300 caratteri), data (YYYY-MM-DD), ora (HH:MM solo se esplicita), google_tipo (tasks/calendario), google_query (nome lista o calendario solo se indicato), google_account (email solo se indicata), google_mode (crm solo se richiesto esplicitamente solo CRM). Converti le date relative. Non inventare dati, non aggiungere ID o stato, ometti cio che manca. Se ci sono piu attivita o date ambigue restituisci {}.`,apiKey);
+   p=await jsonOpenAI(t,`Estrai un solo follow-up privato. Oggi a Roma: ${oggiARoma()}. JSON: descrizione (solo l'attivita da svolgere, massimo 300 caratteri, senza il comando e senza data o ora), data (YYYY-MM-DD), ora (HH:MM solo se esplicita), google_tipo (tasks/calendario), google_query (nome lista o calendario solo se indicato), google_account (email solo se indicata), google_mode (crm solo se richiesto esplicitamente solo CRM). Esempio: "Crea un task per la meta di dicembre da richiamare il proprietario" ha descrizione "Richiamare il proprietario". Converti le date relative. Non inventare dati, non aggiungere ID o stato, ometti cio che manca. Se ci sono piu attivita o date ambigue restituisci {}.`,apiKey);
   }catch{
    return 'Non ho interpretato il messaggio. Riprova oppure usa GG/MM/AAAA HH:MM | Attivita.';
   }
@@ -8474,7 +8474,7 @@ async function fn28RiceviBase29(id:number,t:string):Promise<RispostaBot|null>{
  for(const campo of ['google_tipo','google_query','google_account'])if(typeof p[campo]==='string'&&p[campo].trim())v[campo]=p[campo].trim().slice(0,250);
  if(p.google_tipo||p.google_query||p.google_account){v.google_mode=undefined;v.google_destinazione=undefined;}
  if(p.google_mode==='crm'){v.google_mode='crm';v.google_destinazione=undefined;}
- if(typeof p.descrizione==='string'&&p.descrizione.trim())v.descrizione=p.descrizione.trim();
+ if(typeof p.descrizione==='string'&&p.descrizione.trim())v.descrizione=pulisciAttivita(p.descrizione);
  if(typeof p.data==='string'&&dataValida(p.data))v.data=p.data;
  if(typeof p.ora==='string'&&/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(p.ora))v.ora=p.ora;
  const pronto=Boolean(v.descrizione&&v.descrizione.length<=300&&v.data);
@@ -8868,9 +8868,35 @@ async function ai31RicordaRisposta(id:number,r:RispostaBot,messageId=0){
  const buttons=typeof r==='string'?[]:r.inline_keyboard.flat().filter(b=>b.callback_data).slice(0,80).map(b=>({text:b.text,data:b.callback_data,message_id:messageId}));
  await ai31Traccia(id,'assistant',text,buttons);
 }
+function pulisciAttivita(testo:string):string{
+ let s=String(testo||'').replace(/\s+/g,' ').trim().replace(/[.!?…]+$/u,'');
+ const comando=/^(?:(?:per favore|vorrei|voglio|fammi|puoi)\s+)?(?:crea(?:mi)?|creare|aggiungi|registra|imposta|metti|segna|organizza|ricorda(?:mi)?|prepara|fissa|pianifica)\s+(?:(?:un'?|una'?|uno|il|lo|la|l')\s*)?(?:task|compito|promemoria|evento|appuntamento|follow[\s-]?up|attivit[aà]|impegno)\b\s*/i;
+ if(comando.test(s))s=s.replace(comando,'').replace(/^[:\-–]\s*/,'').trim();
+ else {const ricorda=/^ricorda(?:mi)?\s+(?:di\s+)?(.+)$/i.exec(s);if(ricorda)s=ricorda[1].trim();}
+ const quando=/\b(?:oggi|domani|dopodomani|luned[iì]|marted[iì]|mercoled[iì]|gioved[iì]|venerd[iì]|sabato|domenica|met[aà]|fine|inizio|primi|prossim[oa]|gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre|\d{1,2}(?:[/.-]\d{1,2})?)\b/i.exec(s);
+ if(quando){
+  const resto=s.slice(quando.index+quando[0].length);
+  let taglio=-1;
+  const connettore=/(?:^|\s)(?:da|per)\s+/i.exec(resto);
+  if(connettore)taglio=quando.index+quando[0].length+connettore.index+connettore[0].length;
+  if(taglio<0){
+   const di=/\sdi\s+(?!(?:gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)\b)/i.exec(resto);
+   if(di)taglio=quando.index+quando[0].length+di.index+di[0].length;
+  }
+  if(taglio>0&&taglio<s.length)s=s.slice(taglio).trim();
+ }
+ s=s.replace(/^(?:da|di|per|a)\s+/i,'');
+ s=s.replace(/\s*,?\s+(?:per\s+)?(?:oggi|domani|dopodomani|luned[iì]|marted[iì]|mercoled[iì]|gioved[iì]|venerd[iì]|sabato|domenica)(?:\s+prossim[oa])?(?:\s+(?:alle|ore|h)\s+\d{1,2}(?::\d{2})?)?$/i,'');
+ s=s.replace(/\s*,?\s+(?:a\s+)?(?:la\s+)?met[aà]\s+di\s+[a-zàèéìòù]+(?:\s+(?:alle|ore)\s+\d{1,2}(?::\d{2})?)?$/i,'');
+ s=s.replace(/\s*,?\s+(?:il|l')\s+\d{1,2}\s+(?:gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)(?:\s+\d{4})?(?:\s+(?:alle|ore)\s+\d{1,2}(?::\d{2})?)?$/i,'');
+ s=s.replace(/\s+(?:il|l')\s+\d{1,2}[/.-]\d{1,2}(?:[/.-]\d{2,4})?(?:\s+(?:alle|ore)\s+\d{1,2}(?::\d{2})?)?$/i,'');
+ s=s.replace(/\s+(?:alle|ore|h)\s+\d{1,2}(?::\d{2})?$/i,'').trim();
+ if(!s)s=String(testo||'').replace(/\s+/g,' ').trim();
+ return (s.charAt(0).toUpperCase()+s.slice(1)).slice(0,300);
+}
 function ai31Campi(p:any):Campi{
  const r:Campi={};for(const k of ['persona','indirizzo','descrizione','data','ora','ruolo','google_tipo','google_query','google_account','google_mode','importo','durata_minuti','svolta']){
-  if(p[k]!==null&&p[k]!==undefined)r[k]=p[k];
+  if(p[k]!==null&&p[k]!==undefined)r[k]=k==='descrizione'?pulisciAttivita(String(p[k])):p[k];
  }return r;
 }
 function ai31Unisci(s:G26,p:Campi):G26{
@@ -9647,5 +9673,6 @@ function ai36Normalizza(t:string,p:any,se:CrmSessione|undefined):any{
  if(ai36CampoAtteso(se)!=='descrizione'||p.nuova_richiesta===true||['annulla','conferma','scegli','cambia_destinazione','chiarisci'].includes(p.azione))return p;
  // The answer to the pending description question is task content, even if it
  // mentions owners, contacts or searching. This never persists without preview.
- return {...p,azione:'continua',ambito:se!.stato.fase==='fn28'?'notizia':'personale',descrizione:t.trim()};
+ const base=typeof p.descrizione==='string'&&p.descrizione.trim()?p.descrizione:t;
+ return {...p,azione:'continua',ambito:se!.stato.fase==='fn28'?'notizia':'personale',descrizione:base.trim()};
 }
