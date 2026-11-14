@@ -5549,6 +5549,11 @@ Deno.serve(async (request) => {
         await inviaRisposta(botToken,message.chat.id,esitoRichieste);
         return new Response('OK');
       }
+      if(sessioneRichieste?.stato.fase==='g32_immobile'&&String(sessioneRichieste.stato.valori?.step||'').startsWith('campo_')){
+        const esitoImmobile=await g32Testo(telegramId,message.text.trim(),sessioneRichieste as CrmSessione);
+        await inviaRisposta(botToken,message.chat.id,esitoImmobile);
+        return new Response('OK');
+      }
     }
     // V59: allegati solo dopo "Aggiungi allegato" nella scheda Notizia.
     if(haFoto||haPdf){
@@ -7111,7 +7116,7 @@ async function opImmobileV23(id: number, immobile: string): Promise<RispostaBot>
     if (!i) return 'Immobile non disponibile.';
 
     return {
-      text:`Immobile #${i.id} · ${i.codice}\n${String(i.indirizzo).slice(0,300)}\n${String(i.comune).slice(0,100)} · ${String(i.tipologia).slice(0,100)}\n\nVisitatori = visite registrate come svolte.`,
+      text:`Immobile #${i.id}\n${String(i.indirizzo).slice(0,300)}, ${String(i.comune).slice(0,100)}\nTipologia: ${String(i.tipologia).slice(0,100)}`,
       inline_keyboard:[
         [opBtn('Visitatori e visite svolte',`t:o:v:${immobile}`)],
         [opBtn('Venditori, acquirenti e altri ruoli',`t:o:roles:${immobile}`)],
@@ -9555,7 +9560,7 @@ async function ai31Instrada(id:number,t:string,p:any,se:CrmSessione|undefined,mo
  if(st?.fase==='g32_immobile'){
   if(p.azione==='continua'||p.azione==='classifica_immobile')return g34CompletaImmobile(id,se!,p);
   if(p.azione==='conferma'){
-   const cambiati=['operazione_immobile','fase_acquisizione','stato_commerciale','visibilita','unita','tipologia_immobile','incarico_dal','incarico_al','esclusiva'].some(c=>p[c]!==null&&p[c]!==undefined&&p[c]!==st.valori?.[c]);
+   const cambiati=['operazione_immobile','fase_acquisizione','stato_commerciale','visibilita','unita','tipologia_immobile','incarico_dal','incarico_al','esclusiva','tipo_incarico','indirizzo','comune'].some(c=>p[c]!==null&&p[c]!==undefined&&p[c]!==st.valori?.[c]);
    return cambiati?g32Completa(id,se!,p):g32Salva(id,se!.chiave);
   }
  }
@@ -9567,7 +9572,7 @@ async function ai31Instrada(id:number,t:string,p:any,se:CrmSessione|undefined,mo
   const esplicito=/\bimmobile\s*#?\s*(\d+)/i.exec(t);
   const ultima=(mem?.storia||[]).filter((m:any)=>m.role==='assistant').at(-1)?.content||'';
   const i=esplicito?.[1]||/^Immobile\s*#(\d+)/i.exec(ultima)?.[1];
-  if(!i)return 'Apri la scheda immobile e usa Gestisci classificazione, poi puoi dettare tutti i nuovi dati.';
+  if(!i)return 'Apri la scheda immobile e premi Modifica dati.';
   await g32Modifica(id,i);const nuova=await crmSessione(id);return nuova?.stato.fase==='g32_immobile'?g32Completa(id,nuova,p):'Immobile non disponibile.';
  }
 
@@ -9677,9 +9682,44 @@ const g32Scelte:Record<string,[string,string][]>= {
  fase_acquisizione:[['da_definire','Da definire'],['da_valutare','Da valutare'],['notizia_in_lavorazione','Notizia in lavorazione'],['contatto_avviato','Contatto avviato'],['sopralluogo','Valutazione / sopralluogo'],['trattativa_incarico','Trattativa per incarico'],['incarico_acquisito','Incarico acquisito'],['non_acquisito','Non acquisito']],
  stato_commerciale:[['da_definire','Da definire'],['non_sul_mercato','Non sul mercato'],['in_preparazione','In preparazione'],['disponibile','Disponibile'],['in_trattativa','In trattativa'],['venduto','Venduto'],['locato','Locato'],['sospeso','Sospeso']],
  visibilita:[['privato','Privato del consulente'],['agenzia','Condiviso con agenzia']],
- esclusiva:[['si','Si'],['no','No'],['non_indicata','Non indicata']]
+ esclusiva:[['si','Si'],['no','No'],['non_indicata','Non indicata']],
+ tipo_incarico:[['non_indicato','Non indicato'],['verbale','Incarico verbale'],['scritto','Incarico scritto']]
+};
+const g32Nomi:Record<string,string>={
+ operazione_immobile:'Operazione',fase_acquisizione:'Acquisizione',stato_commerciale:'Stato commerciale',
+ visibilita:'Visibilità',esclusiva:'Esclusiva',tipo_incarico:'Incarico'
 };
 const g32Label=(k:string,v:any)=>g32Scelte[k]?.find(x=>x[0]===v)?.[1]||String(v??'Non indicato');
+function g32Giorno(v:unknown):string{
+ const m=/^(\d{4})-(\d{2})-(\d{2})/.exec(String(v||''));
+ return m?`${m[3]}/${m[2]}/${m[1]}`:'';
+}
+function g32Data(testo:string):string|null{
+ const t=testo.trim().toLowerCase();
+ const iso=dataValida(t);if(iso)return iso;
+ const num=/^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})$/.exec(t);
+ if(num){
+  const anno=num[3].length===2?'20'+num[3]:num[3];
+  return dataValida(`${anno}-${num[2].padStart(2,'0')}-${num[1].padStart(2,'0')}`);
+ }
+ const mesi=['gennaio','febbraio','marzo','aprile','maggio','giugno','luglio','agosto','settembre','ottobre','novembre','dicembre'];
+ const parola=/^(\d{1,2})\s+([a-zàèéìòù]+)\s+(\d{4})$/.exec(t);
+ if(parola){
+  const mese=mesi.indexOf(parola[2].normalize('NFD').replace(/\p{M}/gu,''));
+  if(mese>=0)return dataValida(`${parola[3]}-${String(mese+1).padStart(2,'0')}-${parola[1].padStart(2,'0')}`);
+ }
+ return null;
+}
+function g32IncaricoTesto(p:any):string{
+ const tipo=p.tipo_incarico==='verbale'?'Incarico verbale':p.tipo_incarico==='scritto'?'Incarico scritto':'Non indicato';
+ const dal=g32Giorno(p.incarico_dal);
+ const al=g32Giorno(p.incarico_al);
+ return tipo+(dal?` · dal ${dal}`:'')+(al?` · al ${al}`:'');
+}
+function g32CodiceUtile(codice:unknown):string|null{
+ const c=String(codice||'').trim();
+ return c&&!/^CRM-[0-9a-f-]{36}$/i.test(c)?c:null;
+}
 async function g32Nota(id:number,n:string,azione='leggi',k?:string){
  return crmDb<any>(id,async db=>(await db`SELECT temacase_test.crm32_notizia(${n}::bigint,${azione},${k||null}::uuid) AS r`)[0].r);
 }
@@ -9720,11 +9760,28 @@ async function g32Prop(id:number,i:string){return crmDb<any>(id,async db=>(await
 async function opImmobile(id:number,i:string):Promise<RispostaBot>{
  const p=await g32Prop(id,i);if(!p)return 'Immobile non disponibile.';
  const r=await opImmobileBase32(id,i);if(typeof r==='string')return r;
- r.text+=`\n\nOperazione: ${g32Label('operazione_immobile',p.operazione)}\nAcquisizione: ${g32Label('fase_acquisizione',p.fase_acquisizione)}\nStato commerciale: ${g32Label('stato_commerciale',p.stato_commerciale)}\nUnita: ${p.riferimento_unita||'Da definire'}\nVisibilita: ${g32Label('visibilita',p.visibilita)}\nIncarico: ${p.incarico_dal||'Data non indicata'} → ${p.incarico_al||'Scadenza non indicata'}\nEsclusiva: ${p.esclusiva===null?'Non indicata':p.esclusiva?'Si':'No'}`;
+ const codice=g32CodiceUtile(p.codice);
+ r.text=[
+  `Immobile #${i}`,
+  `${p.indirizzo}, ${p.comune}`,
+  `Tipologia: ${p.tipologia||'Da definire'}`,
+  `Unità: ${p.riferimento_unita||'Da definire'}`,
+  `Operazione: ${g32Label('operazione_immobile',p.operazione)}`,
+  `Acquisizione: ${g32Label('fase_acquisizione',p.fase_acquisizione)}`,
+  `Stato commerciale: ${g32Label('stato_commerciale',p.stato_commerciale)}`,
+  `Visibilità: ${g32Label('visibilita',p.visibilita)}`,
+  `Incarico: ${g32IncaricoTesto(p)}`,
+  `Esclusiva: ${p.esclusiva===null||p.esclusiva===undefined?'Non indicata':p.esclusiva?'Sì':'No'}`,
+  ...(codice?[`Codice: ${codice}`]:[]),
+ ].join('\n');
  const arc34=await g34Archiviato(id,'immobili',i);
- const gestione=[g34B('Modifica','edit','immobili',i),g34B(arc34?'Ripristina':'Archivia',arc34?'restore':'archive','immobili',i)];
- r.inline_keyboard=p.visibilita==='privato'?[gestione]:[gestione,[opBtn('Attività e visite',`t:hub:imm:${i}`)]];
- r.inline_keyboard.unshift([g35B('Proprietari e custodi','open',i)]);
+ r.inline_keyboard=[
+  [opBtn('Modifica dati',`t:g32:property:${i}`)],
+  [opBtn('Incarico',`t:g32:incarico:${i}`)],
+  [g35B('Proprietari e custodi','open',i)],
+  [opBtn('Attività e visite',`t:hub:imm:${i}`)],
+  [g34B(arc34?'Ripristina':'Archivia',arc34?'restore':'archive','immobili',i)],
+ ];
  const referenti35=await g35Db(id,i);
  r.text+='\n\nI tuoi proprietari e custodi:\n'+(referenti35?.map((x:any)=>(x.tipo==='custode'?'Custode: ':'Proprietario: ')+x.nome).join('\n')||'Nessun collegamento.');
  const origini=await crmDb<any[]>(id,async db=>await db`SELECT notizia_id::text AS id FROM temacase_test.crm_notizie_immobili WHERE immobile_id=${i}::bigint AND consulente_telegram_id=${id} ORDER BY collegato_il DESC LIMIT 6`);
@@ -9748,7 +9805,7 @@ async function g32Avvia(id:number,n:string):Promise<RispostaBot>{
 }
 async function g32Modifica(id:number,i:string):Promise<RispostaBot>{
  const p=await g32Prop(id,i);if(!p)return 'Immobile non disponibile.';
- const valori={modo:'modifica',immobile:i,atteso_immobile:p,agenzia:p.agenzia,indirizzo:p.indirizzo,comune:p.comune,tipologia_immobile:p.tipologia,unita:p.riferimento_unita||'',operazione_immobile:p.operazione,fase_acquisizione:p.fase_acquisizione,stato_commerciale:p.stato_commerciale,visibilita:p.visibilita,incarico_dal:p.incarico_dal,incarico_al:p.incarico_al,esclusiva:p.esclusiva,step:'conferma'};
+ const valori={modo:'modifica',immobile:i,atteso_immobile:p,agenzia:p.agenzia,indirizzo:p.indirizzo,comune:p.comune,tipologia_immobile:p.tipologia,unita:p.riferimento_unita||'',operazione_immobile:p.operazione,fase_acquisizione:p.fase_acquisizione,stato_commerciale:p.stato_commerciale,visibilita:p.visibilita,tipo_incarico:p.tipo_incarico||null,incarico_dal:p.incarico_dal,incarico_al:p.incarico_al,esclusiva:p.esclusiva,step:'conferma'};
  const key=await crmAttendi(id,{fase:'g32_immobile',valori} as any);return g32Anteprima(id,key);
 }
 async function g32Anteprima(id:number,k:string):Promise<RispostaBot>{
@@ -9757,21 +9814,83 @@ async function g32Anteprima(id:number,k:string):Promise<RispostaBot>{
  if(v.step==='duplicati')return {text:'Controlla gli immobili accessibili gia presenti. Scegli una unita esistente oppure crea una unita distinta.',inline_keyboard:[...(v.candidati||[]).map((x:any,j:number)=>[opBtn('#'+x.id+' · '+x.indirizzo,v.notizia?`t:g32:link:${k}:${j}`:`t:o:i:${x.id}`)]),[opBtn('Crea una unita distinta',`t:g32:distinct:${k}`)],[opBtn('Annulla',`t:g32:cancel:${k}`)]]};
  if(v.modo==='collega')return {text:`Collega la notizia #${v.notizia} all’immobile #${v.immobile} · ${v.indirizzo}, ${v.comune}.\nI dati dell’immobile esistente non saranno modificati. La notizia resta privata.`,inline_keyboard:[[opBtn('Conferma collegamento',`t:g32:save:${k}`),opBtn('Annulla',`t:g32:cancel:${k}`)]]};
  if(!v.agenzia){return {text:'Scegli agenzia per questo immobile.',inline_keyboard:(v.agenzie||[]).map((a:any,j:number)=>[opBtn(a.nome,`t:g32:agency:${k}:${j}`)])};}
- return {text:`${v.modo==='collega'?'Collega immobile esistente':v.modo==='nuovo'?(v.notizia?'Crea immobile dalla notizia':'Crea immobile'):'Modifica immobile'}\n${v.indirizzo}, ${v.comune}\nTipologia: ${v.tipologia_immobile}\nUnita: ${v.unita||'Da definire'}\nOperazione: ${g32Label('operazione_immobile',v.operazione_immobile)}\nAcquisizione: ${g32Label('fase_acquisizione',v.fase_acquisizione)}\nCommerciale: ${g32Label('stato_commerciale',v.stato_commerciale)}\nVisibilita: ${g32Label('visibilita',v.visibilita)}\nIncarico: ${v.incarico_dal||'Non indicato'} → ${v.incarico_al||'Non indicato'}\nEsclusiva: ${v.esclusiva===null||v.esclusiva===undefined?'Non indicata':v.esclusiva?'Si':'No'}\n\nLe schede e i collegamenti esistenti restano conservati.\n`+(v.visibilita==='agenzia'?'Confermando, la scheda immobile sara visibile ai membri attivi di questa agenzia.':'Potrai condividere la scheda immobile in seguito.')+'\nPuoi anche descrivere le modifiche con testo o vocale.',inline_keyboard:[
- [opBtn('Conferma e salva',`t:g32:save:${k}`),opBtn('Annulla',`t:g32:cancel:${k}`)],
- ...(['operazione_immobile','fase_acquisizione','stato_commerciale','visibilita','esclusiva'].map((c,j)=>[opBtn(({operazione_immobile:'Operazione',fase_acquisizione:'Acquisizione',stato_commerciale:'Stato commerciale',visibilita:'Visibilita',esclusiva:'Esclusiva'} as any)[c],`t:g32:field:${k}:${j}`)])),
- [opBtn('Unita / tipologia / incarico',`t:g32:details:${k}`)],...(v.modo==='modifica'?[[g35B('Proprietari e custodi','open',v.immobile)]]:[]) ]};
+ const testo=`${v.modo==='nuovo'?(v.notizia?'Crea immobile dalla notizia':'Crea immobile'):'Modifica immobile'}\n${v.indirizzo}, ${v.comune}\nTipologia: ${v.tipologia_immobile}\nUnità: ${v.unita||'Da definire'}\nOperazione: ${g32Label('operazione_immobile',v.operazione_immobile)}\nAcquisizione: ${g32Label('fase_acquisizione',v.fase_acquisizione)}\nStato commerciale: ${g32Label('stato_commerciale',v.stato_commerciale)}\nVisibilità: ${g32Label('visibilita',v.visibilita)}\nIncarico: ${g32IncaricoTesto(v)}\nEsclusiva: ${v.esclusiva===null||v.esclusiva===undefined?'Non indicata':v.esclusiva?'Sì':'No'}\n\nSalvo solo dopo Conferma e salva.`;
+ if(v.modo==='modifica')return {text:testo,inline_keyboard:[
+  [opBtn('Conferma e salva',`t:g32:save:${k}`),opBtn('Annulla',`t:g32:cancel:${k}`)],
+  [opBtn('Indirizzo',`t:g32:ask:${k}:indirizzo`)],
+  [opBtn('Tipologia',`t:g32:ask:${k}:tipologia`)],
+  [opBtn('Unità',`t:g32:ask:${k}:unita`)],
+  [opBtn('Operazione',`t:g32:field:${k}:0`)],
+  [opBtn('Acquisizione',`t:g32:field:${k}:1`)],
+  [opBtn('Stato commerciale',`t:g32:field:${k}:2`)],
+  [opBtn('Visibilità',`t:g32:field:${k}:3`)],
+  [opBtn('Incarico',`t:g32:menuinc:${k}`)],
+ ]};
+ return {text:testo+(v.visibilita==='agenzia'?'\nConfermando, la scheda sarà visibile ai membri attivi di questa agenzia.':'\nPotrai condividere la scheda in seguito.'),inline_keyboard:[
+  [opBtn('Conferma e salva',`t:g32:save:${k}`),opBtn('Annulla',`t:g32:cancel:${k}`)],
+  ...(['operazione_immobile','fase_acquisizione','stato_commerciale','visibilita','esclusiva'].map((c,j)=>[opBtn(g32Nomi[c],`t:g32:field:${k}:${j}`)])),
+  [opBtn('Unità, tipologia e incarico',`t:g32:details:${k}`)],
+ ]};
 }
 async function g32Completa(id:number,se:CrmSessione,p:any):Promise<RispostaBot>{
  const v={...se.stato.valori} as any;
  if(v.modo==='collega')return g32Anteprima(id,se.chiave);
  for(const c of ['operazione_immobile','fase_acquisizione','stato_commerciale','visibilita'])if(p[c]!==null&&p[c]!==undefined){if(!g32Scelte[c].some(x=>x[0]===p[c]))return 'Valore non disponibile per '+c;v[c]=p[c];}
- for(const c of ['tipologia_immobile','unita'])if(typeof p[c]==='string'&&p[c].trim())v[c]=p[c].trim().slice(0,c==='unita'?150:100);
- for(const c of ['incarico_dal','incarico_al'])if(p[c]!==null&&p[c]!==undefined){if(!dataValida(p[c]))return 'Indica una data incarico valida.';v[c]=p[c];}
+ if(p.rimuovi_tipo_incarico===true||p.tipo_incarico==='non_indicato')v.tipo_incarico=null;
+ else if(p.tipo_incarico==='verbale'||p.tipo_incarico==='scritto')v.tipo_incarico=p.tipo_incarico;
+ if(typeof p.indirizzo==='string'&&p.indirizzo.trim())v.indirizzo=p.indirizzo.trim().slice(0,250);
+ if(typeof p.comune==='string'&&p.comune.trim())v.comune=p.comune.trim().slice(0,100);
+ if(typeof p.tipologia_immobile==='string'&&p.tipologia_immobile.trim())v.tipologia_immobile=p.tipologia_immobile.trim().slice(0,100);
+ if(p.unita==='')v.unita='';
+ else if(typeof p.unita==='string'&&p.unita.trim())v.unita=p.unita.trim().slice(0,150);
+ if(p.clear_dal===true)v.incarico_dal=null;
+ if(p.clear_al===true)v.incarico_al=null;
+ for(const c of ['incarico_dal','incarico_al'])if(p[c]!==null&&p[c]!==undefined&&p[c]!==''){if(!dataValida(p[c]))return 'Indica una data incarico valida.';v[c]=p[c];}
  if(typeof p.esclusiva==='boolean')v.esclusiva=p.esclusiva;
  if(p.rimuovi_esclusiva===true)v.esclusiva=null;
  if(v.incarico_dal&&v.incarico_al&&v.incarico_al<v.incarico_dal)return 'La scadenza incarico precede la data iniziale. Correggi le date.';
  const key=await fn29Stato(id,se,{...se.stato,valori:{...v,step:v.step==='duplicati'?'duplicati':'conferma'}});return key?g32Anteprima(id,key):'Bozza scaduta.';
+}
+function g32MenuIncarico(k:string,v:any):RispostaBot{
+ const tipo=String(Object.keys(g32Scelte).indexOf('tipo_incarico'));
+ return {text:`Incarico\n${g32IncaricoTesto(v)}\nEsclusiva: ${v.esclusiva===null||v.esclusiva===undefined?'Non indicata':v.esclusiva?'Sì':'No'}\n\nIl tipo si sceglie qui. Le date sono facoltative. Salvo solo dopo Conferma e salva.`,inline_keyboard:[
+  [opBtn('Non indicato',`t:g32:set:${k}:${tipo},0`)],
+  [opBtn('Incarico verbale',`t:g32:set:${k}:${tipo},1`)],
+  [opBtn('Incarico scritto',`t:g32:set:${k}:${tipo},2`)],
+  [opBtn('Data di inizio',`t:g32:data:${k}:dal`),opBtn('Scadenza',`t:g32:data:${k}:al`)],
+  [opBtn('Esclusiva',`t:g32:field:${k}:${Object.keys(g32Scelte).indexOf('esclusiva')}`)],
+  [opBtn('Torna al riepilogo',`t:g32:preview:${k}`)],
+ ]};
+}
+async function g32Chiedi(id:number,se:CrmSessione,campo:string):Promise<RispostaBot>{
+ const domande:Record<string,{step:string,testo:string}>={
+  indirizzo:{step:'campo_indirizzo',testo:'Scrivi indirizzo e comune, separati da una virgola.\nEsempio: via Andrea Maria Amper 122, Milano'},
+  tipologia:{step:'campo_tipologia',testo:'Scrivi la tipologia.\nEsempio: bilocale'},
+  unita:{step:'campo_unita',testo:'Scrivi scala, piano o altri riferimenti dell’unità.\nPer togliere il testo scrivi nessuna.'},
+ };
+ const domanda=domande[campo];if(!domanda)return 'Campo non disponibile.';
+ const key=await fn29Stato(id,se,{...se.stato,valori:{...se.stato.valori,step:domanda.step}});
+ return key?domanda.testo:'Bozza scaduta.';
+}
+async function g32Testo(id:number,testo:string,se:CrmSessione):Promise<RispostaBot>{
+ const step=String(se.stato.valori?.step||'');
+ const t=testo.trim();
+ const vuoto=/^(nessuna|nessuno|non indicat[oa]|togli|cancella)$/i.test(t);
+ if(step==='campo_indirizzo'){
+  const pezzi=t.split(',').map(x=>x.trim()).filter(Boolean);
+  if(pezzi.length<2||pezzi[0].length<3||pezzi.slice(1).join(', ').length<2)return 'Scrivi indirizzo e comune separati da una virgola.\nEsempio: via Andrea Maria Amper 122, Milano';
+  return g32Completa(id,se,{indirizzo:pezzi[0],comune:pezzi.slice(1).join(', ')});
+ }
+ if(step==='campo_tipologia')return t?g32Completa(id,se,{tipologia_immobile:t}):'Scrivi la tipologia.';
+ if(step==='campo_unita')return g32Completa(id,se,{unita:vuoto?'':t});
+ if(step==='campo_dal'||step==='campo_al'){
+  const campo=step==='campo_dal'?'incarico_dal':'incarico_al';
+  if(vuoto)return g32Completa(id,se,step==='campo_dal'?{clear_dal:true}:{clear_al:true});
+  const data=g32Data(t);
+  if(!data)return 'Data non riconosciuta. Usa 12/11/2026, 2026-11-12 oppure 12 novembre 2026.';
+  return g32Completa(id,se,{[campo]:data});
+ }
+ return 'Usa i pulsanti della scheda per scegliere il campo.';
 }
 async function g32Salva(id:number,k:string):Promise<RispostaBot>{
  const r=await crmDb<any>(id,async db=>(await db`SELECT temacase_test.crm32_immobile_salva(${k}::uuid) AS r`)[0].r);
@@ -9955,6 +10074,7 @@ async function g32Pulsante(cb:any,token:string){
   if(noteazioni[a]&&idSchedaValido(k||''))r=await g32AzioneNota(id,k,noteazioni[a]);
   else if(a==='convert'&&idSchedaValido(k||''))r=await g32Avvia(id,k);
   else if(a==='property'&&idSchedaValido(k||''))r=await g32Modifica(id,k);
+  else if(a==='incarico'&&idSchedaValido(k||'')){await g32Modifica(id,k);const aperta=await crmSessione(id);r=aperta?.stato.fase==='g32_immobile'?g32MenuIncarico(aperta.chiave,aperta.stato.valori):'Immobile non disponibile.';}
   else if(['trash','archived'].includes(a)&&/^\d{1,5}$/.test(k||''))r=await g32ElencoNote(id,a==='trash',Number(k));
   else{
    const se=await crmSessione(id);if(se?.chiave===k){const v=se.stato.valori as any;
@@ -9964,9 +10084,12 @@ async function g32Pulsante(cb:any,token:string){
     else if(a==='ipage'&&se.stato.fase==='g32_elenco'&&/^\d{1,5}$/.test(x||''))r=await g32ElencoImmobili(id,v.filtri,Number(x));
     else if(se.stato.fase==='g32_immobile'){
      if(a==='save')r=await g32Salva(id,k);
-     else if(a==='details')r='Scrivi o detta unita, tipologia e dati incarico. Esempio: scala A, piano secondo, bilocale; incarico dal 12 novembre al 31 marzo, in esclusiva.';
-     else if(a==='field'&&/^\d$/.test(x||'')&&Object.keys(g32Scelte)[Number(x)]){const c=Object.keys(g32Scelte)[Number(x)];r={text:'Scegli '+c.replace(/_/g,' '),inline_keyboard:g32Scelte[c].map((e,j)=>[opBtn(e[1],`t:g32:set:${k}:${x},${j}`)])};}
-     else if(a==='set'&&x?.includes(',')){const [ci,j]=x.split(',');const c=Object.keys(g32Scelte)[Number(ci)];if(g32Scelte[c]?.[Number(j)]){const value=g32Scelte[c][Number(j)][0];r=await g32Completa(id,se,c==='esclusiva'&&value==='non_indicata'?{rimuovi_esclusiva:true}:{[c]:c==='esclusiva'?value==='si':value});}}
+     else if(a==='details')r='Scrivi o detta unità, tipologia e dati incarico. Esempio: scala A, piano secondo, bilocale; incarico verbale dal 12 novembre al 31 marzo, in esclusiva.';
+     else if(a==='ask'&&['indirizzo','tipologia','unita'].includes(x||''))r=await g32Chiedi(id,se,x);
+     else if(a==='menuinc')r=g32MenuIncarico(k,v);
+     else if(a==='data'&&(x==='dal'||x==='al')){const key=await fn29Stato(id,se,{...se.stato,valori:{...v,step:x==='dal'?'campo_dal':'campo_al'}});r=key?(x==='dal'?'Scrivi la data di inizio incarico, per esempio 12/11/2026. Per toglierla scrivi nessuna.':'Scrivi la scadenza dell’incarico, per esempio 31/03/2027. Per toglierla scrivi nessuna.'):'Bozza scaduta.';}
+     else if(a==='field'&&/^\d$/.test(x||'')&&Object.keys(g32Scelte)[Number(x)]){const c=Object.keys(g32Scelte)[Number(x)];r={text:'Scegli '+(g32Nomi[c]||c),inline_keyboard:[...g32Scelte[c].map((e,j)=>[opBtn(e[1],`t:g32:set:${k}:${x},${j}`)]),(c==='tipo_incarico'||c==='esclusiva'?[[opBtn('Torna all’incarico',`t:g32:menuinc:${k}`)]]:[]),]};}
+     else if(a==='set'&&x?.includes(',')){const [ci,j]=x.split(',');const c=Object.keys(g32Scelte)[Number(ci)];if(g32Scelte[c]?.[Number(j)]){const value=g32Scelte[c][Number(j)][0];const payload=c==='esclusiva'&&value==='non_indicata'?{rimuovi_esclusiva:true}:c==='tipo_incarico'&&value==='non_indicato'?{rimuovi_tipo_incarico:true}:{[c]:c==='esclusiva'?value==='si':value};r=await g32Completa(id,se,payload);if(c==='tipo_incarico'&&typeof r==='object'){const aperta=await crmSessione(id);if(aperta?.stato.fase==='g32_immobile')r=g32MenuIncarico(aperta.chiave,aperta.stato.valori);}}}
      else{let dopo:any=null;
       if(a==='distinct'&&v.step==='duplicati')dopo={...v,duplicati_verificati:true,step:'conferma'};
       if(a==='agency'&&/^\d{1,2}$/.test(x||'')&&v.agenzie?.[Number(x)])dopo={...v,agenzia:v.agenzie[Number(x)].id};
