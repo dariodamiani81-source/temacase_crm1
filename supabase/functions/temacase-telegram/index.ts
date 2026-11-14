@@ -2006,11 +2006,18 @@ async function menuFollowupBase28(telegramId: number, notiziaId: string): Promis
     text: `Follow-up della notizia #${notiziaId}\n\n` + righe.map((f) =>
       `#${f.id} · ${f.descrizione.slice(0, 160)} · ${f.scadenza_data ?? "Senza data"} ${f.scadenza_ora?.slice(0, 5) ?? ""} · ${f.stato}`
     ).join("\n"),
-    inline_keyboard: righe.map((f) => [
-      { text: `#${f.id} Data e ora`, callback_data: `m:fu:${notiziaId}:${f.id}:data` },
-      { text: "Descrizione", callback_data: `m:fu:${notiziaId}:${f.id}:testo` },
-      { text: "Stato", callback_data: `m:fu:${notiziaId}:${f.id}:stato` },
-    ]),
+    inline_keyboard: righe.flatMap((f) => {
+      const azioni = [
+        { text: `#${f.id} Data e ora`, callback_data: `m:fu:${notiziaId}:${f.id}:data` },
+        { text: "Descrizione", callback_data: `m:fu:${notiziaId}:${f.id}:testo` },
+        { text: "Stato", callback_data: `m:fu:${notiziaId}:${f.id}:stato` },
+      ];
+      const chiusura = f.stato === "annullato" ? [] : [[
+        ...(f.stato === "aperto" ? [{ text: `Completa #${f.id}`, callback_data: `t:fn:ask:c:notizia:${f.id}` }] : []),
+        { text: `Elimina #${f.id}`, callback_data: `t:fn:ask:e:notizia:${f.id}` },
+      ]];
+      return [azioni, ...chiusura];
+    }),
   };
 }
 
