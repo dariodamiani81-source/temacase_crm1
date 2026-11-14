@@ -6915,15 +6915,25 @@ async function crmConferma(
 
       if (
         !Object.keys(v).length ||
-        Object.keys(v).some(k => !ammessi.includes(k))
+        Object.keys(v).some(k => !ammessi.includes(k)) ||
+        (s.azione === "share" && v.visibilita !== "agenzia" && v.visibilita !== "privato") ||
+        (s.azione === "archive" && typeof v.archiviato !== "boolean")
       ) return { testo: "Modifica non valida." };
 
-      // Il secondo argomento di db() è un elenco di colonne, non un array:
-      // db(v, Object.keys(v)) produceva SET ("telefono") = $1 e Postgres
-      // rispondeva 42601. db(oggetto) scrive invece "telefono" = $1.
+      // Aggiornamento colonna per colonna: il costruttore dinamico
+      // produceva SET $1 e Postgres rispondeva 42601, anche per la visibilita.
       const aggiornate = await db`
         UPDATE temacase_test.crm_contatti AS c
-        SET ${db(v)}
+        SET
+          tipo_soggetto = CASE WHEN ${Object.hasOwn(v, "tipo_soggetto")} THEN ${v.tipo_soggetto ?? null} ELSE c.tipo_soggetto END,
+          nome = CASE WHEN ${Object.hasOwn(v, "nome")} THEN ${v.nome ?? null} ELSE c.nome END,
+          cognome = CASE WHEN ${Object.hasOwn(v, "cognome")} THEN ${v.cognome ?? null} ELSE c.cognome END,
+          ragione_sociale = CASE WHEN ${Object.hasOwn(v, "ragione_sociale")} THEN ${v.ragione_sociale ?? null} ELSE c.ragione_sociale END,
+          telefono = CASE WHEN ${Object.hasOwn(v, "telefono")} THEN ${v.telefono ?? null} ELSE c.telefono END,
+          email = CASE WHEN ${Object.hasOwn(v, "email")} THEN ${v.email ?? null} ELSE c.email END,
+          altri_recapiti = CASE WHEN ${Object.hasOwn(v, "altri_recapiti")} THEN ${v.altri_recapiti ?? null} ELSE c.altri_recapiti END,
+          visibilita = CASE WHEN ${Object.hasOwn(v, "visibilita")} THEN ${v.visibilita ?? null} ELSE c.visibilita END,
+          archiviato = CASE WHEN ${Object.hasOwn(v, "archiviato")} THEN ${v.archiviato ?? null} ELSE c.archiviato END
         WHERE c.id = ${contatto}::bigint
           AND c.consulente_telegram_id = ${id}
         RETURNING c.id
