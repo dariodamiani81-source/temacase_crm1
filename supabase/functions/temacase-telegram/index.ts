@@ -6519,6 +6519,7 @@ async function schedaHub(id: number, tipo: string, scheda: string): Promise<Risp
     return {
       text: `Notizia #${scheda} · Task e sviluppo`,
       inline_keyboard: [
+        [{ text: "Modifica follow-up", callback_data: `m:followup:${scheda}` }],
         [{ text: "Nuovo task o evento", callback_data: `t:fn:new:${scheda}` }],
         [{ text: "Collega task già creato", callback_data: `n63:list:${scheda}` }],
         [{ text: "Gestione / sviluppo", callback_data: `z55:open:${scheda}` }],
